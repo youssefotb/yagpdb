@@ -41,6 +41,7 @@ import (
 	"github.com/jonas747/yagpdb/reminders"
 	"github.com/jonas747/yagpdb/reputation"
 	"github.com/jonas747/yagpdb/rolecommands"
+	"github.com/jonas747/yagpdb/scheduledcustomcommands"
 	"github.com/jonas747/yagpdb/serverstats"
 	"github.com/jonas747/yagpdb/soundboard"
 	"github.com/jonas747/yagpdb/stdcommands"
@@ -151,6 +152,7 @@ func main() {
 	cah.RegisterPlugin()
 	premium.RegisterPlugin()
 	patreonpremiumsource.RegisterPlugin()
+	scheduledcustomcommands.RegisterPlugin()
 	scheduledevents2.RegisterPlugin()
 
 	if flagDryRun {
