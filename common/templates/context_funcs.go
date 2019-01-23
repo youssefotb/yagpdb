@@ -262,9 +262,8 @@ func (c *Context) tmplTargetHasRoleID(target interface{}, roleID interface{}) bo
 		return false
 	}
 
-	
 	contains := common.ContainsInt64Slice(ts.Roles, role)
-	
+
 	return contains
 
 }

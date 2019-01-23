@@ -238,10 +238,9 @@ func baseContextFuncs(c *Context) {
 	c.ContextFuncs["giveRoleName"] = c.tmplGiveRoleName
 	c.ContextFuncs["takeRoleID"] = c.tmplTakeRoleID
 	c.ContextFuncs["takeRoleName"] = c.tmplTakeRoleName
-	
+
 	c.ContextFuncs["targetHasRoleID"] = c.tmplTargetHasRoleID
 	c.ContextFuncs["targetHasRoleName"] = c.tmplTargetHasRoleName
-	
 
 	c.ContextFuncs["deleteResponse"] = c.tmplDelResponse
 	c.ContextFuncs["deleteTrigger"] = c.tmplDelTrigger
@@ -254,6 +253,8 @@ func baseContextFuncs(c *Context) {
 	c.ContextFuncs["currentUserCreated"] = c.tmplCurrentUserCreated
 	c.ContextFuncs["currentUserAgeHuman"] = c.tmplCurrentUserAgeHuman
 	c.ContextFuncs["currentUserAgeMinutes"] = c.tmplCurrentUserAgeMinutes
+
+	c.ContextFuncs["httpGet"] = c.tmplHTTPGet
 }
 
 type limitedWriter struct {
