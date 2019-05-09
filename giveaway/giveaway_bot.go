@@ -13,7 +13,9 @@ import (
 	seventsmodels "github.com/jonas747/yagpdb/common/scheduledevents2/models"
 	"github.com/jonas747/yagpdb/giveaway/models"
 	"github.com/pkg/errors"
+	"github.com/volatiletech/null"
 	"github.com/volatiletech/sqlboiler/boil"
+	"github.com/volatiletech/sqlboiler/queries/qm"
 	"math/rand"
 	"regexp"
 	"strconv"
@@ -213,6 +215,7 @@ func (p *Plugin) AddCommands() {
 			activeGiveaways, err := models.Giveaways(
 				models.GiveawayWhere.GuildID.EQ(parsed.GS.ID),
 				models.GiveawayWhere.EndedAt.IsNull(),
+				qm.OrderBy("message_id asc"),
 			).AllG(parsed.Context())
 
 			if err != nil {
@@ -222,7 +225,7 @@ func (p *Plugin) AddCommands() {
 			var out strings.Builder
 			for _, v := range activeGiveaways {
 				when := v.EndsAt.Sub(time.Now())
-				out.WriteString(fmt.Sprintf("%s - `%s` - %s\n", v.Description, v.MessageID, common.HumanizeDuration(common.DurationPrecisionSeconds, when)))
+				out.WriteString(fmt.Sprintf("%s - `%d` - %s\n", v.Description, v.MessageID, common.HumanizeDuration(common.DurationPrecisionSeconds, when)))
 			}
 
 			return out.String(), nil
@@ -275,6 +278,11 @@ func (p *Plugin) handleGiveawayUpdateEvent(evt *seventsmodels.ScheduledEvent, da
 		}
 
 		return true, err
+	}
+
+	if giveaway.EndedAt.Valid {
+		// probably used the end command to finish the giveaway
+		return false, nil
 	}
 
 	if time.Now().After(giveaway.EndsAt) {
@@ -371,6 +379,12 @@ func CompleteGiveaway(giveaway *models.Giveaway) error {
 		_, err = common.BotSession.ChannelMessageSend(giveaway.ChannelID, extraMsg)
 	}
 
+	if err != nil {
+		return err
+	}
+
+	giveaway.EndedAt = null.TimeFrom(time.Now())
+	_, err = giveaway.UpdateG(context.Background(), boil.Whitelist("ended_at"))
 	return err
 }
 
