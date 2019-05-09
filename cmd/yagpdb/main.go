@@ -33,6 +33,7 @@ import (
 	"github.com/jonas747/yagpdb/commands"
 	"github.com/jonas747/yagpdb/customcommands"
 	"github.com/jonas747/yagpdb/discordlogger"
+	"github.com/jonas747/yagpdb/giveaway"
 	"github.com/jonas747/yagpdb/logs"
 	"github.com/jonas747/yagpdb/moderation"
 	"github.com/jonas747/yagpdb/notifications"
@@ -157,6 +158,7 @@ func main() {
 	cah.RegisterPlugin()
 	tickets.RegisterPlugin()
 	verification.RegisterPlugin()
+	giveaway.RegisterPlugin()
 	premium.RegisterPlugin()
 	patreonpremiumsource.RegisterPlugin()
 	scheduledevents2.RegisterPlugin()
