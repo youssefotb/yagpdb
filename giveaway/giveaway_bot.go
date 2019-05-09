@@ -334,10 +334,7 @@ func CompleteGiveaway(giveaway *models.Giveaway) error {
 
 	OUTER:
 		for i, v := range winners {
-			if i != 0 {
-				descStr += ", "
-			}
-			descStr += "`" + v.Username + "#" + v.Discriminator + "`"
+			descStr += "\n`" + v.Username + "#" + v.Discriminator + "`"
 
 			// possibly add to the extra winner message
 			for j := 0; j < i; j++ {
