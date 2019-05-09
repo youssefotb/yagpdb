@@ -222,7 +222,7 @@ func (p *Plugin) AddCommands() {
 			var out strings.Builder
 			for _, v := range activeGiveaways {
 				when := v.EndsAt.Sub(time.Now())
-				out.WriteString(fmt.Sprintf("%s - `%s` - %s", v.Description, v.MessageID, common.HumanizeDuration(common.DurationPrecisionSeconds, when)))
+				out.WriteString(fmt.Sprintf("%s - `%s` - %s\n", v.Description, v.MessageID, common.HumanizeDuration(common.DurationPrecisionSeconds, when)))
 			}
 
 			return out.String(), nil
@@ -333,7 +333,7 @@ func CompleteGiveaway(giveaway *models.Giveaway) error {
 
 			// possibly add to the extra winner message
 			for j := 0; j < i; j++ {
-				if participants[j].ID == v.ID {
+				if winners[j].ID == v.ID {
 					continue OUTER
 				}
 			}
@@ -346,7 +346,7 @@ func CompleteGiveaway(giveaway *models.Giveaway) error {
 			extraMsg += "<@" + strconv.FormatInt(v.ID, 10) + ">"
 		}
 
-		extraMsg += " you won " + giveaway.Description
+		extraMsg += " you won " + giveaway.Description + "!"
 	}
 
 	_, err = common.BotSession.ChannelMessageEditComplex(&discordgo.MessageEdit{
@@ -359,7 +359,7 @@ func CompleteGiveaway(giveaway *models.Giveaway) error {
 			Color:       giveaway.Color,
 			Timestamp:   giveaway.EndsAt.Format(time.RFC3339),
 			Footer: &discordgo.MessageEmbedFooter{
-				Text: "Ended at",
+				Text: "Ended",
 			},
 		},
 	})
@@ -403,12 +403,12 @@ func GetAllMessageReactions(channelID, messageID int64, emojiUnicode string, emo
 		emojiStr += ":" + strconv.FormatInt(emojiID, 10)
 	}
 
-	before := int64(0)
+	after := int64(0)
 
 	users := make([]*discordgo.User, 0, 100)
 
 	for {
-		reactions, err := common.BotSession.MessageReactions(channelID, messageID, emojiStr, 100, before, 0)
+		reactions, err := common.BotSession.MessageReactions(channelID, messageID, emojiStr, 100, 0, after)
 		if err != nil {
 			return nil, err
 		}
@@ -424,7 +424,7 @@ func GetAllMessageReactions(channelID, messageID int64, emojiUnicode string, emo
 		if len(reactions) < 100 {
 			break
 		} else {
-			before = users[len(users)-1].ID
+			after = reactions[len(reactions)-1].ID
 		}
 	}
 
@@ -468,7 +468,7 @@ func UpdateGiveawayMessage(giveaway *models.Giveaway) error {
 
 	content := descEmoji + " **GIVEAWAY** " + descEmoji
 
-	footer := strconv.Itoa(giveaway.NumWinners) + " winner(s) | Ends at "
+	footer := strconv.Itoa(giveaway.NumWinners) + " winner(s) | Ends "
 
 	_, err := common.BotSession.ChannelMessageEditComplex(&discordgo.MessageEdit{
 		Channel: giveaway.ChannelID,
@@ -494,7 +494,7 @@ func CalcNextRunTime(giveaway *models.Giveaway) time.Time {
 
 	now := time.Now()
 	if durFromNow < time.Second*10 {
-		return now.Add(time.Second)
+		return now
 	} else if durFromNow < time.Minute {
 		return now.Add(time.Second * 2)
 	} else if durFromNow < time.Minute*10 {
