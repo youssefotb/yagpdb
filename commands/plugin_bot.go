@@ -128,7 +128,9 @@ func YAGCommandMiddleware(inner dcmd.RunFunc) dcmd.RunFunc {
 					resp += "```\n" + switches + "\n```"
 				}
 
-				return resp + "\nInvalid arguments provided: " + err.Error(), nil
+				resp = resp + "\nInvalid arguments provided: " + err.Error()
+				yc.PostCommandExecuted(settings, data, resp, nil)
+				return nil, nil
 			}
 
 			return nil, err
