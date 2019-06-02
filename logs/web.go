@@ -3,7 +3,13 @@ package logs
 import (
 	"errors"
 	"fmt"
+	"html/template"
+	"net/http"
+	"strconv"
+	"strings"
+
 	"github.com/jonas747/discordgo"
+	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/bot/botrest"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/logs/models"
@@ -12,10 +18,6 @@ import (
 	"github.com/volatiletech/sqlboiler/boil"
 	"goji.io"
 	"goji.io/pat"
-	"html/template"
-	"net/http"
-	"strconv"
-	"strings"
 )
 
 var AuthorColors = []string{
@@ -156,6 +158,10 @@ func HandleLogsCPSaveGeneral(w http.ResponseWriter, r *http.Request) (web.Templa
 	}
 
 	err := config.UpsertG(ctx, true, []string{"guild_id"}, boil.Infer(), boil.Infer())
+	if err == nil {
+		logger.Println("evicting")
+		bot.EvictGSCache(g.ID, CacheKeyConfig)
+	}
 	return tmpl, err
 }
 

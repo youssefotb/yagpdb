@@ -1,13 +1,12 @@
 package scheduledevents2
 
 import (
-	// "github.com/jonas747/yagpdb/bot"
-	"github.com/jonas747/yagpdb/common"
-	"github.com/jonas747/yagpdb/common/scheduledevents2/models"
-	// "log"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jonas747/yagpdb/common"
+	"github.com/jonas747/yagpdb/common/scheduledevents2/models"
 )
 
 var SchemaInit = false

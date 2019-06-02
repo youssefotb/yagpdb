@@ -3,19 +3,20 @@ package bot
 import (
 	"context"
 	"errors"
-	"github.com/bwmarrin/snowflake"
-	"github.com/jonas747/discordgo"
-	"github.com/jonas747/dstate"
-	"github.com/jonas747/dutil"
-	"github.com/jonas747/yagpdb/common"
-	"github.com/jonas747/yagpdb/common/pubsub"
-	"github.com/mediocregopher/radix"
-	"github.com/patrickmn/go-cache"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/bwmarrin/snowflake"
+	"github.com/jonas747/discordgo"
+	"github.com/jonas747/dstate"
+	"github.com/jonas747/dutil"
+	"github.com/jonas747/retryableredis"
+	"github.com/jonas747/yagpdb/common"
+	"github.com/jonas747/yagpdb/common/pubsub"
+	"github.com/patrickmn/go-cache"
 )
 
 var (
@@ -33,6 +34,8 @@ func init() {
 
 		return false
 	}
+
+	pubsub.AddHandler("bot_core_evict_gs_cache", handleEvictCachePubsub, "")
 }
 
 func ContextSession(ctx context.Context) *discordgo.Session {
@@ -133,8 +136,8 @@ func SetStatus(streaming, status string) {
 		status = "v" + common.VERSION + " :)"
 	}
 
-	err1 := common.RedisPool.Do(radix.Cmd(nil, "SET", "status_streaming", streaming))
-	err2 := common.RedisPool.Do(radix.Cmd(nil, "SET", "status_name", status))
+	err1 := common.RedisPool.Do(retryableredis.Cmd(nil, "SET", "status_streaming", streaming))
+	err2 := common.RedisPool.Do(retryableredis.Cmd(nil, "SET", "status_name", status))
 	if err1 != nil {
 		logger.WithError(err1).Error("failed setting bot status in redis")
 	}
@@ -284,7 +287,7 @@ func runNumShardsUpdater() {
 
 func fetchTotalShardsFromRedis() error {
 	var result int64
-	err := common.RedisPool.Do(radix.Cmd(&result, "GET", "yagpdb_total_shards"))
+	err := common.RedisPool.Do(retryableredis.Cmd(&result, "GET", "yagpdb_total_shards"))
 	if err != nil {
 		return err
 	}
@@ -319,8 +322,8 @@ func NodeID() string {
 func RefreshStatus(session *discordgo.Session) {
 	var streamingURL string
 	var status string
-	err1 := common.RedisPool.Do(radix.Cmd(&streamingURL, "GET", "status_streaming"))
-	err2 := common.RedisPool.Do(radix.Cmd(&status, "GET", "status_name"))
+	err1 := common.RedisPool.Do(retryableredis.Cmd(&streamingURL, "GET", "status_streaming"))
+	err2 := common.RedisPool.Do(retryableredis.Cmd(&status, "GET", "status_name"))
 	if err1 != nil {
 		logger.WithError(err1).Error("failed retrieiving bot streaming status")
 	}
@@ -438,4 +441,35 @@ func GetUsersGS(gs *dstate.GuildState, ids ...int64) []*discordgo.User {
 	}
 
 	return resp
+}
+
+func EvictGSCache(guildID int64, key GSCacheKey) {
+	if Enabled {
+		evictGSCacheLocal(guildID, key)
+	} else {
+		evictGSCacheRemote(guildID, key)
+	}
+}
+
+func evictGSCacheLocal(guildID int64, key GSCacheKey) {
+	gs := State.Guild(true, guildID)
+	if gs == nil {
+		return
+	}
+
+	gs.UserCacheDel(true, key)
+}
+
+type GSCacheKey string
+
+func evictGSCacheRemote(guildID int64, key GSCacheKey) {
+	err := pubsub.Publish("bot_core_evict_gs_cache", guildID, key)
+	if err != nil {
+		logger.WithError(err).WithField("guild", guildID).WithField("key", key).Error("failed evicting remote cache")
+	}
+}
+
+func handleEvictCachePubsub(evt *pubsub.Event) {
+	key := evt.Data.(*string)
+	evictGSCacheLocal(evt.TargetGuildInt, GSCacheKey(*key))
 }

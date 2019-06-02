@@ -4,11 +4,12 @@ package eventsystem
 
 import (
 	"context"
+	"runtime/debug"
+	"sync/atomic"
+
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/sirupsen/logrus"
-	"runtime/debug"
-	"sync/atomic"
 )
 
 func init() {
