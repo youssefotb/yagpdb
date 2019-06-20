@@ -26,7 +26,7 @@ import (
 const (
 	VERSIONMAJOR = 1
 	VERSIONMINOR = 19
-	VERSIONPATCH = 5
+	VERSIONPATCH = 7
 )
 
 var (
@@ -141,12 +141,13 @@ func setupGlobalDGoSession() (err error) {
 	innerTransport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,
-			KeepAlive: 5 * time.Second,
+			Timeout:   10 * time.Second,
+			KeepAlive: 10 * time.Second,
 			DualStack: true,
 		}).DialContext,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   maxCCReqs,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
@@ -239,6 +240,15 @@ func InitSchema(schema string, name string) {
 	_, err := PQ.Exec(schema)
 	if err != nil {
 		logger.WithError(err).Fatal("failed initializing postgres db schema for ", name)
+	}
+
+	return
+}
+
+func InitSchemas(name string, schemas ...string) {
+	for i, v := range schemas {
+		actualName := fmt.Sprintf("%s[%d]", name, i)
+		InitSchema(v, actualName)
 	}
 
 	return
