@@ -64,13 +64,15 @@ var (
 	flagRunWeb        bool
 	flagRunFeeds      string
 	flagRunEverything bool
-	flagDryRun        bool
 	flagRunBWC        bool
+
+	flagDryRun bool
 
 	flagLogTimestamp bool
 
-	flagSysLog     bool
-	flagGenCmdDocs bool
+	flagSysLog        bool
+	flagGenCmdDocs    bool
+	flagGenConfigDocs bool
 
 	flagNodeID string
 )
@@ -86,6 +88,7 @@ func init() {
 	flag.BoolVar(&flagSysLog, "syslog", false, "Set to log to syslog (only linux)")
 	flag.BoolVar(&flagRunBWC, "backgroundworkers", false, "Run the various background workers, atleast one process needs this")
 	flag.BoolVar(&flagGenCmdDocs, "gencmddocs", false, "Generate command docs and exit")
+	flag.BoolVar(&flagGenConfigDocs, "genconfigdocs", false, "Generate config docs and exit")
 
 	flag.BoolVar(&flagLogTimestamp, "ts", false, "Set to include timestamps in log")
 
@@ -124,7 +127,7 @@ func main() {
 		}
 	}
 
-	if !flagRunBot && !flagRunWeb && flagRunFeeds == "" && !flagRunEverything && !flagDryRun && !flagRunBWC {
+	if !flagRunBot && !flagRunWeb && flagRunFeeds == "" && !flagRunEverything && !flagDryRun && !flagRunBWC && !flagGenConfigDocs {
 		log.Error("Didnt specify what to run, see -h for more info")
 		return
 	}
@@ -186,6 +189,11 @@ func main() {
 
 	if flagGenCmdDocs {
 		GenCommandsDocs()
+		return
+	}
+
+	if flagGenConfigDocs {
+		GenConfigDocs()
 		return
 	}
 
