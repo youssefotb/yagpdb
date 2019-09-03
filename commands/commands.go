@@ -8,6 +8,7 @@ import (
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/common"
+	"github.com/jonas747/yagpdb/common/config"
 )
 
 var logger = common.GetPluginLogger(&Plugin{})
@@ -21,6 +22,10 @@ const (
 )
 
 type MessageFilterFunc func(msg *discordgo.Message) bool
+
+var (
+	confSetTyping = config.RegisterOption("yagpdb.commands.typing", "Wether to set typing or not when running commands", true)
+)
 
 // These functions are called on every message, and should return true if the message should be checked for commands, false otherwise
 var MessageFilterFuncs []MessageFilterFunc
@@ -43,7 +48,7 @@ func RegisterPlugin() {
 		logger.WithError(err).Fatal("Failed migrating logged commands database")
 	}
 
-	common.InitSchema(DBSchema, "commands")
+	common.InitSchemas("commands", DBSchemas...)
 }
 
 type CommandProvider interface {

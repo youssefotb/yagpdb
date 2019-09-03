@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dutil"
 	"github.com/jonas747/yagpdb/common"
-	"github.com/pkg/errors"
 )
 
 // dictionary creates a map[string]interface{} from the given parameters by
@@ -257,6 +257,14 @@ func tmplDiv(args ...interface{}) interface{} {
 	}
 }
 
+func tmplMod(args ...interface{}) interface{} {
+	if len(args) != 2 {
+		return 0
+	}
+
+	return math.Mod(ToFloat64(args[0]), ToFloat64(args[1]))
+}
+
 func tmplFDiv(args ...interface{}) interface{} {
 	if len(args) < 1 {
 		return 0
@@ -355,7 +363,7 @@ func sequence(start, stop int) ([]int, error) {
 	}
 
 	if stop-start > 10000 {
-		return nil, errors.New("Sequence max length is 1000")
+		return nil, errors.New("Sequence max length is 10000")
 	}
 
 	out := make([]int, stop-start)
@@ -646,6 +654,12 @@ func slice(item reflect.Value, indices ...reflect.Value) (reflect.Value, error) 
 
 func tmplCurrentTime() time.Time {
 	return time.Now()
+}
+
+func tmplNewDate(year, monthInt, day, hour, min, sec int) time.Time {
+	var month time.Month
+	month = time.Month(monthInt)
+	return time.Date(year, month, day, hour, min, sec, 0, time.UTC)
 }
 
 func tmplEscapeHere(in string) string {

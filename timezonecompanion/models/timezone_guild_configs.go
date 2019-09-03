@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
+	"emperror.dev/errors"
 	"github.com/volatiletech/sqlboiler/boil"
 	"github.com/volatiletech/sqlboiler/queries"
 	"github.com/volatiletech/sqlboiler/queries/qm"
@@ -94,10 +94,10 @@ var TimezoneGuildConfigWhere = struct {
 	EnabledInChannels   whereHelpertypes_Int64Array
 	NewChannelsDisabled whereHelperbool
 }{
-	GuildID:             whereHelperint64{field: `guild_id`},
-	DisabledInChannels:  whereHelpertypes_Int64Array{field: `disabled_in_channels`},
-	EnabledInChannels:   whereHelpertypes_Int64Array{field: `enabled_in_channels`},
-	NewChannelsDisabled: whereHelperbool{field: `new_channels_disabled`},
+	GuildID:             whereHelperint64{field: "\"timezone_guild_configs\".\"guild_id\""},
+	DisabledInChannels:  whereHelpertypes_Int64Array{field: "\"timezone_guild_configs\".\"disabled_in_channels\""},
+	EnabledInChannels:   whereHelpertypes_Int64Array{field: "\"timezone_guild_configs\".\"enabled_in_channels\""},
+	NewChannelsDisabled: whereHelperbool{field: "\"timezone_guild_configs\".\"new_channels_disabled\""},
 }
 
 // TimezoneGuildConfigRels is where relationship names are stored.
@@ -117,7 +117,7 @@ func (*timezoneGuildConfigR) NewStruct() *timezoneGuildConfigR {
 type timezoneGuildConfigL struct{}
 
 var (
-	timezoneGuildConfigColumns               = []string{"guild_id", "disabled_in_channels", "enabled_in_channels", "new_channels_disabled"}
+	timezoneGuildConfigAllColumns            = []string{"guild_id", "disabled_in_channels", "enabled_in_channels", "new_channels_disabled"}
 	timezoneGuildConfigColumnsWithoutDefault = []string{"guild_id", "disabled_in_channels", "enabled_in_channels", "new_channels_disabled"}
 	timezoneGuildConfigColumnsWithDefault    = []string{}
 	timezoneGuildConfigPrimaryKeyColumns     = []string{"guild_id"}
@@ -170,7 +170,7 @@ func (q timezoneGuildConfigQuery) One(ctx context.Context, exec boil.ContextExec
 		if errors.Cause(err) == sql.ErrNoRows {
 			return nil, sql.ErrNoRows
 		}
-		return nil, errors.Wrap(err, "models: failed to execute a one query for timezone_guild_configs")
+		return nil, errors.WrapIf(err, "models: failed to execute a one query for timezone_guild_configs")
 	}
 
 	return o, nil
@@ -187,7 +187,7 @@ func (q timezoneGuildConfigQuery) All(ctx context.Context, exec boil.ContextExec
 
 	err := q.Bind(ctx, exec, &o)
 	if err != nil {
-		return nil, errors.Wrap(err, "models: failed to assign all query results to TimezoneGuildConfig slice")
+		return nil, errors.WrapIf(err, "models: failed to assign all query results to TimezoneGuildConfig slice")
 	}
 
 	return o, nil
@@ -207,7 +207,7 @@ func (q timezoneGuildConfigQuery) Count(ctx context.Context, exec boil.ContextEx
 
 	err := q.Query.QueryRowContext(ctx, exec).Scan(&count)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to count timezone_guild_configs rows")
+		return 0, errors.WrapIf(err, "models: failed to count timezone_guild_configs rows")
 	}
 
 	return count, nil
@@ -228,7 +228,7 @@ func (q timezoneGuildConfigQuery) Exists(ctx context.Context, exec boil.ContextE
 
 	err := q.Query.QueryRowContext(ctx, exec).Scan(&count)
 	if err != nil {
-		return false, errors.Wrap(err, "models: failed to check if timezone_guild_configs exists")
+		return false, errors.WrapIf(err, "models: failed to check if timezone_guild_configs exists")
 	}
 
 	return count > 0, nil
@@ -265,7 +265,7 @@ func FindTimezoneGuildConfig(ctx context.Context, exec boil.ContextExecutor, gui
 		if errors.Cause(err) == sql.ErrNoRows {
 			return nil, sql.ErrNoRows
 		}
-		return nil, errors.Wrap(err, "models: unable to select from timezone_guild_configs")
+		return nil, errors.WrapIf(err, "models: unable to select from timezone_guild_configs")
 	}
 
 	return timezoneGuildConfigObj, nil
@@ -294,7 +294,7 @@ func (o *TimezoneGuildConfig) Insert(ctx context.Context, exec boil.ContextExecu
 
 	if !cached {
 		wl, returnColumns := columns.InsertColumnSet(
-			timezoneGuildConfigColumns,
+			timezoneGuildConfigAllColumns,
 			timezoneGuildConfigColumnsWithDefault,
 			timezoneGuildConfigColumnsWithoutDefault,
 			nzDefaults,
@@ -338,7 +338,7 @@ func (o *TimezoneGuildConfig) Insert(ctx context.Context, exec boil.ContextExecu
 	}
 
 	if err != nil {
-		return errors.Wrap(err, "models: unable to insert into timezone_guild_configs")
+		return errors.WrapIf(err, "models: unable to insert into timezone_guild_configs")
 	}
 
 	if !cached {
@@ -368,7 +368,7 @@ func (o *TimezoneGuildConfig) Update(ctx context.Context, exec boil.ContextExecu
 
 	if !cached {
 		wl := columns.UpdateColumnSet(
-			timezoneGuildConfigColumns,
+			timezoneGuildConfigAllColumns,
 			timezoneGuildConfigPrimaryKeyColumns,
 		)
 
@@ -399,12 +399,12 @@ func (o *TimezoneGuildConfig) Update(ctx context.Context, exec boil.ContextExecu
 	var result sql.Result
 	result, err = exec.ExecContext(ctx, cache.query, values...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to update timezone_guild_configs row")
+		return 0, errors.WrapIf(err, "models: unable to update timezone_guild_configs row")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by update for timezone_guild_configs")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by update for timezone_guild_configs")
 	}
 
 	if !cached {
@@ -427,12 +427,12 @@ func (q timezoneGuildConfigQuery) UpdateAll(ctx context.Context, exec boil.Conte
 
 	result, err := q.Query.ExecContext(ctx, exec)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to update all for timezone_guild_configs")
+		return 0, errors.WrapIf(err, "models: unable to update all for timezone_guild_configs")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to retrieve rows affected for timezone_guild_configs")
+		return 0, errors.WrapIf(err, "models: unable to retrieve rows affected for timezone_guild_configs")
 	}
 
 	return rowsAff, nil
@@ -481,12 +481,12 @@ func (o TimezoneGuildConfigSlice) UpdateAll(ctx context.Context, exec boil.Conte
 
 	result, err := exec.ExecContext(ctx, sql, args...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to update all in timezoneGuildConfig slice")
+		return 0, errors.WrapIf(err, "models: unable to update all in timezoneGuildConfig slice")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to retrieve rows affected all in update all timezoneGuildConfig")
+		return 0, errors.WrapIf(err, "models: unable to retrieve rows affected all in update all timezoneGuildConfig")
 	}
 	return rowsAff, nil
 }
@@ -541,13 +541,13 @@ func (o *TimezoneGuildConfig) Upsert(ctx context.Context, exec boil.ContextExecu
 
 	if !cached {
 		insert, ret := insertColumns.InsertColumnSet(
-			timezoneGuildConfigColumns,
+			timezoneGuildConfigAllColumns,
 			timezoneGuildConfigColumnsWithDefault,
 			timezoneGuildConfigColumnsWithoutDefault,
 			nzDefaults,
 		)
 		update := updateColumns.UpdateColumnSet(
-			timezoneGuildConfigColumns,
+			timezoneGuildConfigAllColumns,
 			timezoneGuildConfigPrimaryKeyColumns,
 		)
 
@@ -595,7 +595,7 @@ func (o *TimezoneGuildConfig) Upsert(ctx context.Context, exec boil.ContextExecu
 		_, err = exec.ExecContext(ctx, cache.query, vals...)
 	}
 	if err != nil {
-		return errors.Wrap(err, "models: unable to upsert timezone_guild_configs")
+		return errors.WrapIf(err, "models: unable to upsert timezone_guild_configs")
 	}
 
 	if !cached {
@@ -630,12 +630,12 @@ func (o *TimezoneGuildConfig) Delete(ctx context.Context, exec boil.ContextExecu
 
 	result, err := exec.ExecContext(ctx, sql, args...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to delete from timezone_guild_configs")
+		return 0, errors.WrapIf(err, "models: unable to delete from timezone_guild_configs")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by delete for timezone_guild_configs")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by delete for timezone_guild_configs")
 	}
 
 	return rowsAff, nil
@@ -651,12 +651,12 @@ func (q timezoneGuildConfigQuery) DeleteAll(ctx context.Context, exec boil.Conte
 
 	result, err := q.Query.ExecContext(ctx, exec)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to delete all from timezone_guild_configs")
+		return 0, errors.WrapIf(err, "models: unable to delete all from timezone_guild_configs")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by deleteall for timezone_guild_configs")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by deleteall for timezone_guild_configs")
 	}
 
 	return rowsAff, nil
@@ -669,10 +669,6 @@ func (o TimezoneGuildConfigSlice) DeleteAllG(ctx context.Context) (int64, error)
 
 // DeleteAll deletes all rows in the slice, using an executor.
 func (o TimezoneGuildConfigSlice) DeleteAll(ctx context.Context, exec boil.ContextExecutor) (int64, error) {
-	if o == nil {
-		return 0, errors.New("models: no TimezoneGuildConfig slice provided for delete all")
-	}
-
 	if len(o) == 0 {
 		return 0, nil
 	}
@@ -693,12 +689,12 @@ func (o TimezoneGuildConfigSlice) DeleteAll(ctx context.Context, exec boil.Conte
 
 	result, err := exec.ExecContext(ctx, sql, args...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to delete all from timezoneGuildConfig slice")
+		return 0, errors.WrapIf(err, "models: unable to delete all from timezoneGuildConfig slice")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by deleteall for timezone_guild_configs")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by deleteall for timezone_guild_configs")
 	}
 
 	return rowsAff, nil
@@ -756,7 +752,7 @@ func (o *TimezoneGuildConfigSlice) ReloadAll(ctx context.Context, exec boil.Cont
 
 	err := q.Bind(ctx, exec, &slice)
 	if err != nil {
-		return errors.Wrap(err, "models: unable to reload all in TimezoneGuildConfigSlice")
+		return errors.WrapIf(err, "models: unable to reload all in TimezoneGuildConfigSlice")
 	}
 
 	*o = slice
@@ -783,7 +779,7 @@ func TimezoneGuildConfigExists(ctx context.Context, exec boil.ContextExecutor, g
 
 	err := row.Scan(&exists)
 	if err != nil {
-		return false, errors.Wrap(err, "models: unable to check if timezone_guild_configs exists")
+		return false, errors.WrapIf(err, "models: unable to check if timezone_guild_configs exists")
 	}
 
 	return exists, nil

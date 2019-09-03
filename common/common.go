@@ -25,8 +25,8 @@ import (
 
 const (
 	VERSIONMAJOR = 1
-	VERSIONMINOR = 19
-	VERSIONPATCH = 7
+	VERSIONMINOR = 20
+	VERSIONPATCH = 4
 )
 
 var (
@@ -95,6 +95,7 @@ func Init() error {
 		panic(err)
 	}
 
+	logger.Info("Retrieving bot info....")
 	BotUser, err = BotSession.UserMe()
 	if err != nil {
 		panic(err)
@@ -108,7 +109,8 @@ func Init() error {
 		panic(err)
 	}
 
-	InitSchema(CoreServerConfDBSchema, "core_configs")
+	logger.Info("Initializing core schema")
+	InitSchemas("core_configs", CoreServerConfDBSchema)
 
 	return err
 }
@@ -135,7 +137,7 @@ func setupGlobalDGoSession() (err error) {
 
 	logger.Info("max ccr set to: ", maxCCReqs)
 
-	BotSession.MaxRestRetries = 5
+	BotSession.MaxRestRetries = 10
 	BotSession.Ratelimiter.MaxConcurrentRequests = maxCCReqs
 
 	innerTransport := &http.Transport{
@@ -157,7 +159,7 @@ func setupGlobalDGoSession() (err error) {
 		logger.Info("Keep alive connections to REST api for discord is disabled, may cause overhead")
 	}
 
-	BotSession.Client.HTTPClient.Transport = &LoggingTransport{Inner: innerTransport}
+	BotSession.Client.Transport = &LoggingTransport{Inner: innerTransport}
 
 	return nil
 }
@@ -234,22 +236,4 @@ func connectDB(host, user, pass, dbName string) error {
 	GORM.SetLogger(&GORMLogger{})
 
 	return err
-}
-
-func InitSchema(schema string, name string) {
-	_, err := PQ.Exec(schema)
-	if err != nil {
-		logger.WithError(err).Fatal("failed initializing postgres db schema for ", name)
-	}
-
-	return
-}
-
-func InitSchemas(name string, schemas ...string) {
-	for i, v := range schemas {
-		actualName := fmt.Sprintf("%s[%d]", name, i)
-		InitSchema(v, actualName)
-	}
-
-	return
 }

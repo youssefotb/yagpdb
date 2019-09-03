@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/pkg/errors"
+	"emperror.dev/errors"
 
 	"github.com/olebedev/when/rules"
 )
@@ -26,7 +26,7 @@ func Hour(s rules.Strategy) rules.Rule {
 	return &rules.F{
 		RegExp: regexp.MustCompile("(?i)(?:\\W|^)" +
 			"(\\d{1,2})" +
-			"(?:\\s*(A\\.|P\\.|A\\.M\\.|P\\.M\\.|AM?|PM?))" +
+			"(?:\\s*(A\\.M\\.|P\\.M\\.|AM|PM))" +
 			"(?:\\W|$)"),
 		Applier: func(m *rules.Match, c *rules.Context, o *rules.Options, ref time.Time) (bool, error) {
 			if c.Hour != nil && s != rules.Override {
@@ -35,7 +35,7 @@ func Hour(s rules.Strategy) rules.Rule {
 
 			hour, err := strconv.Atoi(m.Captures[0])
 			if err != nil {
-				return false, errors.Wrap(err, "hour rule")
+				return false, errors.WrapIf(err, "hour rule")
 			}
 
 			if hour > 12 {

@@ -31,8 +31,6 @@ var (
 	UsingOrchestrator bool
 
 	MessageDeleteQueue = deletequeue.NewQueue()
-
-	FlagNodeID string
 )
 
 var (
@@ -42,11 +40,8 @@ var (
 )
 
 var (
-	// the variables below specify shard clustering information, for splitting shards across multiple processes and machines
-	// this is very work in process and does not work at all atm
-	//
-	// plugins that needs to perform shard specific tasks, not directly related to incoming gateway events should check here
-	// to make sure the action they're doing is relevant to the current cluster (example: scheduled events should only run events for guilds on this cluster)
+	// the variables below specify shard orchestrating info received from a shard orchestrator (see cmd/shardorchestrator)
+	// there are unused if were running standalone
 
 	// the total amount of shards this bot is set to use across all processes
 	totalShardCount int
@@ -56,83 +51,12 @@ var (
 	processShardsLock sync.RWMutex
 )
 
-func setup() {
-	common.InitSchema(DBSchema, "core_bot")
-
-	discordgo.IdentifyRatelimiter = &identifyRatelimiter{}
-
-	// Things may rely on state being available at this point for initialization
-	State = dstate.NewState()
-	State.MaxChannelMessages = 1000
-	State.MaxMessageAge = time.Hour
-	// State.Debug = true
-	State.ThrowAwayDMMessages = true
-	State.TrackPrivateChannels = false
-	State.CacheExpirey = time.Minute * 10
-	go State.RunGCWorker()
-
-	eventsystem.AddHandlerFirst(HandleReady, eventsystem.EventReady)
-	eventsystem.AddHandlerSecond(StateHandler, eventsystem.EventAll)
-
-	eventsystem.AddHandlerAsyncLast(EventLogger.handleEvent, eventsystem.EventAll)
-
-	eventsystem.AddHandlerAsyncLast(HandleGuildCreate, eventsystem.EventGuildCreate)
-	eventsystem.AddHandlerAsyncLast(HandleGuildDelete, eventsystem.EventGuildDelete)
-
-	eventsystem.AddHandlerAsyncLast(HandleGuildUpdate, eventsystem.EventGuildUpdate)
-	eventsystem.AddHandlerAsyncLast(HandleGuildRoleCreate, eventsystem.EventGuildRoleCreate)
-	eventsystem.AddHandlerAsyncLast(HandleGuildRoleUpdate, eventsystem.EventGuildRoleUpdate)
-	eventsystem.AddHandlerAsyncLast(HandleGuildRoleRemove, eventsystem.EventGuildRoleDelete)
-	eventsystem.AddHandlerAsyncLast(HandleChannelCreate, eventsystem.EventChannelCreate)
-	eventsystem.AddHandlerAsyncLast(HandleChannelUpdate, eventsystem.EventChannelUpdate)
-	eventsystem.AddHandlerAsyncLast(HandleChannelDelete, eventsystem.EventChannelDelete)
-	eventsystem.AddHandlerAsyncLast(HandleGuildMemberUpdate, eventsystem.EventGuildMemberUpdate)
-	eventsystem.AddHandlerAsyncLast(HandleGuildMemberAdd, eventsystem.EventGuildMemberAdd)
-	eventsystem.AddHandlerAsyncLast(HandleGuildMemberRemove, eventsystem.EventGuildMemberRemove)
-	eventsystem.AddHandlerAsyncLast(HandleGuildMembersChunk, eventsystem.EventGuildMembersChunk)
-	eventsystem.AddHandlerAsyncLast(HandleReactionAdd, eventsystem.EventMessageReactionAdd)
-	eventsystem.AddHandlerAsyncLast(HandleMessageCreate, eventsystem.EventMessageCreate)
-	eventsystem.AddHandlerAsyncLast(HandleResumed, eventsystem.EventResumed)
-}
-
-func Run() {
+func Run(nodeID string) {
 	setup()
 
 	logger.Println("Running bot")
 
-	connEvtChannel := confConnEventChannel.GetInt()
-	connStatusChannel := confConnStatus.GetInt()
-
-	// Set up shard manager
-	ShardManager = dshardmanager.New(common.GetBotToken())
-	ShardManager.LogChannel = int64(connEvtChannel)
-	ShardManager.StatusMessageChannel = int64(connStatusChannel)
-	ShardManager.Name = "YAGPDB"
-	ShardManager.GuildCountsFunc = GuildCountsFunc
-	ShardManager.SessionFunc = func(token string) (session *discordgo.Session, err error) {
-		session, err = discordgo.New(token)
-		if err != nil {
-			return
-		}
-
-		session.StateEnabled = false
-		session.LogLevel = discordgo.LogInformational
-		session.SyncEvents = true
-
-		// Certain discordgo internals expect this to be present
-		// but in case of shard migration it's not, so manually assign it here
-		session.State.Ready = discordgo.Ready{
-			User: &discordgo.SelfUser{
-				User: common.BotUser,
-			},
-		}
-
-		return
-	}
-
-	// Only handler
-	ShardManager.AddHandler(eventsystem.HandleEvent)
-
+	// either start standalone or set up a connection to a shard orchestrator
 	orcheStratorAddress := confShardOrchestratorAddress.GetString()
 	if orcheStratorAddress != "" {
 		UsingOrchestrator = true
@@ -148,45 +72,24 @@ func Run() {
 	Running = true
 
 	if UsingOrchestrator {
-		// TODO
-		NodeConn = node.NewNodeConn(&NodeImpl{}, orcheStratorAddress, common.VERSION, FlagNodeID, nil)
+		NodeConn = node.NewNodeConn(&NodeImpl{}, orcheStratorAddress, common.VERSION, nodeID, nil)
 		NodeConn.Run()
 	} else {
 		go ShardManager.Start()
 		InitPlugins()
 	}
+}
 
-	// if masterAddr != "" {
-	// 	stateLock.Lock()
-	// 	state = StateWaitingHelloMaster
-	// 	stateLock.Unlock()
+func setup() {
+	common.InitSchemas("core_bot", DBSchema)
 
-	// 	logger.Println("Connecting to master at ", masterAddr, ", wont start until connected and told to start")
-	// 	var err error
-	// 	SlaveClient, err = slave.ConnectToMaster(&SlaveImpl{}, masterAddr)
-	// 	if err != nil {
-	// 		logger.WithError(err).Error("Failed connecting to master")
-	// 		os.Exit(1)
-	// 	}
-	// } else {
-	// 	stateLock.Lock()
-	// 	state = StateRunningNoMaster
-	// 	stateLock.Unlock()
+	discordgo.IdentifyRatelimiter = &identifyRatelimiter{}
 
-	// 	InitPlugins()
+	setupState()
+	addBotHandlers()
+	setupShardManager()
 
-	// 	logger.Println("Running normally without a master")
-	// 	go ShardManager.Start()
-	// 	go MonitorLoading()
-	// }
-
-	// for _, p := range common.Plugins {
-	// 	starter, ok := p.(BotStarterHandler)
-	// 	if ok {
-	// 		starter.StartBot()
-	// 		logger.Debug("Ran StartBot for ", p.Name())
-	// 	}
-	// }
+	common.BotSession.AddHandler(eventsystem.HandleEvent)
 }
 
 func SetupStandalone() {
@@ -197,6 +100,7 @@ func SetupStandalone() {
 	totalShardCount = shardCount
 
 	EventLogger.init(shardCount)
+	eventsystem.InitWorkers(shardCount)
 	go EventLogger.run()
 
 	processShards = make([]int, totalShardCount)
@@ -214,6 +118,8 @@ func InitPlugins() {
 	pubsub.AddHandler("bot_status_changed", func(evt *pubsub.Event) {
 		updateAllShardStatuses()
 	}, nil)
+
+	pubsub.AddHandler("global_ratelimit", handleGlobalRatelimtPusub, GlobalRatelimitTriggeredEventData{})
 
 	// Initialize all plugins
 	for _, plugin := range common.Plugins {
@@ -308,4 +214,63 @@ func goroutineLogger() {
 		num := runtime.NumGoroutine()
 		common.Statsd.Gauge("yagpdb.numgoroutine", float64(num), nil, 1)
 	}
+}
+
+type GlobalRatelimitTriggeredEventData struct {
+	Reset  time.Time `json:"reset"`
+	Bucket string    `json:"bucket"`
+}
+
+func handleGlobalRatelimtPusub(evt *pubsub.Event) {
+	data := evt.Data.(*GlobalRatelimitTriggeredEventData)
+	common.BotSession.Ratelimiter.SetGlobalTriggered(data.Reset)
+}
+
+func setupState() {
+	// Things may rely on state being available at this point for initialization
+	State = dstate.NewState()
+	State.MaxChannelMessages = 1000
+	State.MaxMessageAge = time.Hour
+	// State.Debug = true
+	State.ThrowAwayDMMessages = true
+	State.TrackPrivateChannels = false
+	State.CacheExpirey = time.Minute * 10
+	go State.RunGCWorker()
+
+	eventsystem.DiscordState = State
+}
+
+func setupShardManager() {
+	connEvtChannel := confConnEventChannel.GetInt()
+	connStatusChannel := confConnStatus.GetInt()
+
+	// Set up shard manager
+	ShardManager = dshardmanager.New(common.GetBotToken())
+	ShardManager.LogChannel = int64(connEvtChannel)
+	ShardManager.StatusMessageChannel = int64(connStatusChannel)
+	ShardManager.Name = "YAGPDB"
+	ShardManager.GuildCountsFunc = GuildCountsFunc
+	ShardManager.SessionFunc = func(token string) (session *discordgo.Session, err error) {
+		session, err = discordgo.New(token)
+		if err != nil {
+			return
+		}
+
+		session.StateEnabled = false
+		session.LogLevel = discordgo.LogInformational
+		session.SyncEvents = true
+
+		// Certain discordgo internals expect this to be present
+		// but in case of shard migration it's not, so manually assign it here
+		session.State.Ready = discordgo.Ready{
+			User: &discordgo.SelfUser{
+				User: common.BotUser,
+			},
+		}
+
+		return
+	}
+
+	// Only handler
+	ShardManager.AddHandler(eventsystem.HandleEvent)
 }

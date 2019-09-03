@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dstate"
 	"github.com/jonas747/retryableredis"
 	"github.com/lib/pq"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -640,4 +640,27 @@ func SqlTX(f func(tx *sql.Tx) error) error {
 	}
 
 	return tx.Commit()
+}
+
+func SendOwnerAlert(msgf string, args ...interface{}) {
+	mainOwner := int64(0)
+	if len(BotOwners) > 0 {
+		mainOwner = BotOwners[0]
+	}
+	ch, err := BotSession.UserChannelCreate(int64(mainOwner))
+	if err != nil {
+		return
+	}
+
+	BotSession.ChannelMessageSend(ch.ID, fmt.Sprintf(msgf, args...))
+}
+
+func IsOwner(userID int64) bool {
+	for _, v := range BotOwners {
+		if v == userID {
+			return true
+		}
+	}
+
+	return false
 }

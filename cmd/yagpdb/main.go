@@ -74,6 +74,8 @@ var (
 	flagGenCmdDocs    bool
 	flagGenConfigDocs bool
 
+	flagLogAppName string
+
 	flagNodeID string
 )
 
@@ -86,6 +88,7 @@ func init() {
 	flag.BoolVar(&flagRunEverything, "all", false, "Set to everything (discord bot, webserver, backgroundworkers and all feeds)")
 	flag.BoolVar(&flagDryRun, "dry", false, "Do a dryrun, initialize all plugins but don't actually start anything")
 	flag.BoolVar(&flagSysLog, "syslog", false, "Set to log to syslog (only linux)")
+	flag.StringVar(&flagLogAppName, "logappname", "yagpdb", "When using syslog, the application name will be set to this")
 	flag.BoolVar(&flagRunBWC, "backgroundworkers", false, "Run the various background workers, atleast one process needs this")
 	flag.BoolVar(&flagGenCmdDocs, "gencmddocs", false, "Generate command docs and exit")
 	flag.BoolVar(&flagGenConfigDocs, "genconfigdocs", false, "Generate config docs and exit")
@@ -97,7 +100,6 @@ func init() {
 
 func main() {
 	flag.Parse()
-	bot.FlagNodeID = flagNodeID
 	common.NodeID = flagNodeID
 
 	common.AddLogHook(common.ContextHook{})
@@ -139,7 +141,10 @@ func main() {
 		log.WithError(err).Fatal("Failed intializing")
 	}
 
+	log.Info("Initiliazing generic config store")
 	configstore.InitDatabases()
+
+	log.Info("Starting plugins")
 
 	//BotSession.LogLevel = discordgo.LogInformational
 	paginatedmessages.RegisterPlugin()
@@ -204,7 +209,7 @@ func main() {
 	if flagRunBot || flagRunEverything {
 		mqueue.RegisterPlugin()
 		botrest.RegisterPlugin()
-		bot.Run()
+		bot.Run(flagNodeID)
 	}
 
 	if flagRunFeeds != "" || flagRunEverything {

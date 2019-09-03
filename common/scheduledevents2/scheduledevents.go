@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/scheduledevents2/models"
-	"github.com/pkg/errors"
 	"github.com/volatiletech/sqlboiler/boil"
 	"github.com/volatiletech/sqlboiler/queries/qm"
 )
@@ -43,7 +43,7 @@ func (p *ScheduledEvents) PluginInfo() *common.PluginInfo {
 }
 
 func RegisterPlugin() {
-	common.InitSchema(DBSchema, "scheduledevents2")
+	common.InitSchemas("scheduledevents2", DBSchemas...)
 
 	common.RegisterPlugin(newScheduledEventsPlugin())
 }

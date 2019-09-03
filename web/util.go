@@ -216,7 +216,7 @@ func IsAdminRequest(ctx context.Context, r *http.Request) bool {
 		// there is a active session, but they're not on the related guild (if any)
 
 		cast := user.(*discordgo.User)
-		if cast.ID == int64(common.ConfOwner.GetInt()) {
+		if common.IsOwner(cast.ID) {
 			return true
 		}
 
@@ -339,7 +339,12 @@ func EnabledDisabledSpanStatus(enabled bool) (str string) {
 func GetRequestIP(r *http.Request) string {
 	headerField := confReverseProxyClientIPHeader.GetString()
 	if headerField == "" {
-		return strings.Split(r.RemoteAddr, ":")[0]
+		li := strings.LastIndex(r.RemoteAddr, ":")
+		if li < 0 {
+			return r.RemoteAddr
+		}
+
+		return r.RemoteAddr[:li]
 	}
 
 	return r.Header.Get(headerField)

@@ -217,6 +217,10 @@ func (m *memberFetcher) next(guildID int64) (more bool) {
 
 		var member *discordgo.Member
 		member, err = common.BotSession.GuildMember(guildID, elem.Member)
+		if err == nil && (member != nil && member.User == nil) {
+			err = errors.New("User is nil")
+		}
+
 		if err != nil {
 			logger.WithField("guild", guildID).WithField("user", elem.Member).WithError(err).Debug("Failed fetching member")
 			code, _ := common.DiscordError(err)
@@ -226,6 +230,13 @@ func (m *memberFetcher) next(guildID int64) (more bool) {
 		} else {
 			member.GuildID = guildID
 			go eventsystem.EmitEvent(eventsystem.NewEventData(nil, eventsystem.EventMemberFetched, &discordgo.GuildMemberAdd{Member: member}), eventsystem.EventMemberFetched)
+			if member == nil {
+				panic("nil member")
+			}
+
+			if member.User == nil {
+				panic("nil user")
+			}
 
 			if gs := State.Guild(true, guildID); gs != nil {
 				gs.MemberAddUpdate(true, member)

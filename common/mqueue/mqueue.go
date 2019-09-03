@@ -3,17 +3,20 @@ package mqueue
 import (
 	"container/list"
 	"encoding/json"
+	"github.com/jonas747/yagpdb/common/config"
+	"net"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/mediocregopher/radix"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -32,6 +35,8 @@ var (
 	webhookSession *discordgo.Session
 
 	logger = common.GetPluginLogger(&Plugin{})
+
+	confMaxWorkers = config.RegisterOption("yagpdb.mqueue.max_workers", "Max mqueue sending workers", 2)
 )
 
 type PluginWithErrorHandler interface {
@@ -64,6 +69,27 @@ func RegisterPlugin() {
 	webhookSession, err = discordgo.New()
 	if err != nil {
 		logger.WithError(err).Error("failed initiializing webhook session")
+	}
+	webhookSession.AddHandler(handleWebhookSessionRatelimit)
+
+	innerTransport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 10 * time.Second,
+			DualStack: true,
+		}).DialContext,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   10,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	webhookSession.Client.Transport = innerTransport
+
+	_, err = common.PQ.Exec(DBSchema)
+	if err != nil {
+		logrus.WithError(err).Error("[mqueue] failed initiializing db schema")
 	}
 
 	p := &Plugin{}
@@ -182,6 +208,11 @@ func workerScaler() {
 			logger.Info("Launched new mqueue worker, total workers: ", atomic.LoadInt32(numWorkers)+1)
 			go processWorker()
 			lastWorkerSpawnedAt = time.Now()
+		}
+
+		nw := atomic.LoadInt32(numWorkers)
+		if int(nw) >= confMaxWorkers.GetInt() {
+			return
 		}
 	}
 }
@@ -312,6 +343,17 @@ OUTER:
 			}
 		}
 
+		// Skip channels we have already skipped over
+		for j, w := range workSlice {
+			if j >= i {
+				break
+			}
+
+			if w.elem.Channel == v.elem.Channel {
+				continue OUTER
+			}
+		}
+
 		b := common.BotSession.Ratelimiter.GetBucket(discordgo.EndpointChannelMessages(v.elem.Channel))
 		b.Lock()
 		waitTime := common.BotSession.Ratelimiter.GetWaitTime(b, 1)
@@ -405,6 +447,17 @@ func process(elem *QueuedElement, raw []byte) {
 
 				break
 			}
+		} else {
+			if onGuild, err := common.BotIsOnGuild(elem.Guild); !onGuild {
+				if source, ok := sources[elem.Source]; ok {
+					logger.WithError(err).Warnf("disabling feed item %s from %s to nonexistant guild", elem.SourceID, elem.Source)
+					source.DisableFeed(elem, err)
+				}
+
+				break
+			} else if err != nil {
+				logger.WithError(err).Error("failed checking if bot is on guild")
+			}
 		}
 
 		if c, _ := common.DiscordError(err); c != 0 {
@@ -453,6 +506,10 @@ func trySendNormal(l *logrus.Entry, elem *QueuedElement) (err error) {
 	return
 }
 
+type CacheKeyWebhook int64
+
+var ErrGuildNotFound = errors.New("Guild not found")
+
 func trySendWebhook(l *logrus.Entry, elem *QueuedElement) (err error) {
 	if elem.MessageStr == "" && elem.MessageEmbed == nil {
 		l.Error("Both MessageEmbed and MessageStr empty")
@@ -467,10 +524,20 @@ func trySendWebhook(l *logrus.Entry, elem *QueuedElement) (err error) {
 		}
 	}
 
-	webhook, err := FindCreateWebhook(elem.Guild, elem.Channel, elem.Source, avatar)
+	gs := bot.State.Guild(true, elem.Guild)
+	if gs == nil {
+		return ErrGuildNotFound
+	}
+
+	wh, err := gs.UserCacheFetch(true, CacheKeyWebhook(elem.Channel), func() (interface{}, error) {
+		return FindCreateWebhook(elem.Guild, elem.Channel, elem.Source, avatar)
+		// return weho
+	})
+
 	if err != nil {
 		return err
 	}
+	webhook := wh.(*Webhook)
 
 	webhookParams := &discordgo.WebhookParams{
 		Username: elem.WebhookUsername,
@@ -487,11 +554,23 @@ func trySendWebhook(l *logrus.Entry, elem *QueuedElement) (err error) {
 		const query = `DELETE FROM mqueue_webhooks WHERE id=$1`
 		_, err := common.PQ.Exec(query, webhook.ID)
 		if err != nil {
-			return errors.Wrap(err, "sql.delete")
+			return errors.WrapIf(err, "sql.delete")
 		}
+
+		gs.UserCacheDel(true, CacheKeyWebhook(elem.Channel))
 
 		return errors.New("deleted webhook")
 	}
 
 	return
+}
+
+func handleWebhookSessionRatelimit(s *discordgo.Session, r *discordgo.RateLimit) {
+	if !r.TooManyRequests.Global {
+		return
+	}
+
+	if common.Statsd != nil {
+		common.Statsd.Incr("yagpdb.webhook_session_ratelimit", nil, 1)
+	}
 }

@@ -3,6 +3,7 @@ package verification
 import (
 	"context"
 	"database/sql"
+	"emperror.dev/errors"
 	"fmt"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dstate"
@@ -16,6 +17,7 @@ import (
 	"github.com/jonas747/yagpdb/verification/models"
 	"github.com/jonas747/yagpdb/web"
 	"github.com/volatiletech/sqlboiler/boil"
+	"github.com/volatiletech/sqlboiler/queries/qm"
 	"math/rand"
 	"strings"
 	"sync"
@@ -33,8 +35,8 @@ type VerificationEventData struct {
 }
 
 func (p *Plugin) BotInit() {
-	eventsystem.AddHandlerAsyncLast(p.handleMemberJoin, eventsystem.EventGuildMemberAdd)
-	eventsystem.AddHandlerAsyncLast(p.handleBanAdd, eventsystem.EventGuildBanAdd)
+	eventsystem.AddHandlerAsyncLastLegacy(p, p.handleMemberJoin, eventsystem.EventGuildMemberAdd)
+	eventsystem.AddHandlerAsyncLastLegacy(p, p.handleBanAdd, eventsystem.EventGuildBanAdd)
 	scheduledevents2.RegisterHandler("verification_user_verified", int64(0), ScheduledEventMW(p.handleUserVerifiedScheduledEvent))
 	scheduledevents2.RegisterHandler("verification_user_warn", VerificationEventData{}, ScheduledEventMW(p.handleWarnUserVerification))
 	scheduledevents2.RegisterHandler("verification_user_kick", VerificationEventData{}, ScheduledEventMW(p.handleKickUser))
@@ -209,7 +211,15 @@ func (p *Plugin) handleUserVerifiedScheduledEvent(ms *dstate.MemberState, guildI
 
 	model, err := models.FindVerifiedUserG(context.Background(), guildID, ms.ID)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, err
+		}
 		return scheduledevents2.CheckDiscordErrRetry(err), err
+	}
+
+	err = p.clearScheduledEvents(context.Background(), guildID, ms.ID)
+	if err != nil {
+		return true, err
 	}
 
 	if !confVerificationTrackIPs.GetBool() || model.IP == "" {
@@ -271,6 +281,19 @@ func (p *Plugin) handleUserVerifiedScheduledEvent(ms *dstate.MemberState, guildI
 	return false, nil
 }
 
+func (p *Plugin) clearScheduledEvents(ctx context.Context, guildID, userID int64) error {
+	_, err := seventsmodels.ScheduledEvents(
+		qm.Where("(event_name='verification_user_warn' OR event_name='verification_user_kick')"),
+		qm.Where("guild_id = ?", guildID),
+		qm.Where("(data->>'user_id')::bigint = ?", userID),
+		qm.Where("processed = false")).DeleteAll(ctx, common.PQ)
+	if err != nil {
+		return errors.WithStackIf(err)
+	}
+
+	return nil
+}
+
 func (p *Plugin) findIPConflicts(guildID int64, userID int64, ip string) ([]*discordgo.User, error) {
 
 	conflicts, err := models.VerifiedUsers(models.VerifiedUserWhere.GuildID.EQ(guildID), models.VerifiedUserWhere.IP.EQ(ip)).AllG(context.Background())
@@ -324,13 +347,21 @@ func (p *Plugin) handleWarnUserVerification(ms *dstate.MemberState, guildID int6
 
 	d := rawData.(*VerificationEventData)
 
-	if !common.ContainsInt64Slice(ms.Roles, conf.VerifiedRole) {
-		err := p.sendWarning(ms, gs, d.Token, conf)
+	exists, err := models.VerificationSessions(
+		models.VerificationSessionWhere.Token.EQ(d.Token),
+		models.VerificationSessionWhere.SolvedAt.IsNotNull(),
+	).ExistsG(context.Background())
+	if err != nil {
 		return scheduledevents2.CheckDiscordErrRetry(err), err
 	}
 
-	// verified
-	return false, nil
+	if exists {
+		// User was verified
+		return false, nil
+	}
+
+	err = p.sendWarning(ms, gs, d.Token, conf)
+	return scheduledevents2.CheckDiscordErrRetry(err), err
 }
 
 func (p *Plugin) sendWarning(ms *dstate.MemberState, gs *dstate.GuildState, token string, conf *models.VerificationConfig) error {
@@ -358,17 +389,28 @@ func (p *Plugin) sendWarning(ms *dstate.MemberState, gs *dstate.GuildState, toke
 }
 
 func (p *Plugin) handleKickUser(ms *dstate.MemberState, guildID int64, conf *models.VerificationConfig, rawData interface{}) (retry bool, err error) {
-	if !common.ContainsInt64Slice(ms.Roles, conf.VerifiedRole) {
-		err := common.BotSession.GuildMemberDelete(guildID, ms.ID)
-		if err == nil {
-			p.logAction(conf.LogChannel, ms.DGoUser(), "Kicked for not verifying within deadline", 0xef4640)
-		}
 
+	dataCast := rawData.(*VerificationEventData)
+
+	exists, err := models.VerificationSessions(
+		models.VerificationSessionWhere.Token.EQ(dataCast.Token),
+		models.VerificationSessionWhere.SolvedAt.IsNotNull(),
+	).ExistsG(context.Background())
+	if err != nil {
 		return scheduledevents2.CheckDiscordErrRetry(err), err
 	}
 
-	// verified
-	return false, nil
+	if exists {
+		// User was verified
+		return false, nil
+	}
+
+	err = common.BotSession.GuildMemberDelete(guildID, ms.ID)
+	if err == nil {
+		p.logAction(conf.LogChannel, ms.DGoUser(), "Kicked for not verifying within deadline", 0xef4640)
+	}
+
+	return scheduledevents2.CheckDiscordErrRetry(err), err
 }
 
 func (p *Plugin) logAction(channelID int64, author *discordgo.User, action string, color int) {

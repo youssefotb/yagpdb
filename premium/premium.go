@@ -3,13 +3,15 @@ package premium
 import (
 	"context"
 	"database/sql"
+	"github.com/jonas747/yagpdb/common/config"
 	"time"
 
+	"emperror.dev/errors"
 	"github.com/jonas747/retryableredis"
+	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/templates"
 	"github.com/jonas747/yagpdb/premium/models"
-	"github.com/pkg/errors"
 	"github.com/volatiletech/null"
 	"github.com/volatiletech/sqlboiler/boil"
 	"github.com/volatiletech/sqlboiler/queries/qm"
@@ -22,6 +24,10 @@ const (
 	RedisKeyPremiumGuilds          = "premium_activated_guilds"
 	RedisKeyPremiumGuildsTmp       = "premium_activated_guilds_tmp"
 	RedisKeyPremiumGuildLastActive = "premium_guild_last_active"
+)
+
+var (
+	confAllGuildsPremium = config.RegisterOption("yagpdb.premium.all_guilds_premium", "All servers have premium", false)
 )
 
 var logger = common.GetPluginLogger(&Plugin{})
@@ -38,7 +44,7 @@ func (p *Plugin) PluginInfo() *common.PluginInfo {
 }
 
 func RegisterPlugin() {
-	common.InitSchema(DBSchema, "premium")
+	common.InitSchemas("premium", DBSchemas...)
 
 	common.RegisterPlugin(&Plugin{})
 
@@ -51,12 +57,50 @@ func RegisterPlugin() {
 
 // IsGuildPremium return true if the provided guild has the premium status provided to it by a user
 func IsGuildPremium(guildID int64) (bool, error) {
+	if confAllGuildsPremium.GetBool() {
+		return true, nil
+	}
+
 	var premium bool
 	err := common.RedisPool.Do(retryableredis.FlatCmd(&premium, "HEXISTS", RedisKeyPremiumGuilds, guildID))
 	return premium, errors.WithMessage(err, "IsGuildPremium")
 }
 
+type CacheKey int
+
+const CacheKeyIsPremium CacheKey = 1
+
+// IsGuildPremium return true if the provided guild has the premium status provided to it by a user
+func IsGuildPremiumCached(guildID int64) (bool, error) {
+	if confAllGuildsPremium.GetBool() {
+		return true, nil
+	}
+
+	if !bot.Enabled || bot.State == nil {
+		return IsGuildPremium(guildID)
+	}
+
+	gs := bot.State.Guild(true, guildID)
+	if gs == nil {
+		return IsGuildPremium(guildID)
+	}
+
+	v, err := gs.UserCacheFetch(true, CacheKeyIsPremium, func() (interface{}, error) {
+		return IsGuildPremium(guildID)
+	})
+
+	if err != nil {
+		return false, err
+	}
+
+	return v.(bool), nil
+}
+
 func PremiumProvidedBy(guildID int64) (int64, error) {
+	if confAllGuildsPremium.GetBool() {
+		return int64(common.BotUser.ID), nil
+	}
+
 	var userID int64
 	err := common.RedisPool.Do(retryableredis.FlatCmd(&userID, "HGET", RedisKeyPremiumGuilds, guildID))
 	return userID, errors.WithMessage(err, "PremiumProvidedBy")
@@ -64,10 +108,14 @@ func PremiumProvidedBy(guildID int64) (int64, error) {
 
 // AllGuildsOncePremium returns all the guilds that have has premium once, and the last time that was active
 func AllGuildsOncePremium() (map[int64]time.Time, error) {
+	if confAllGuildsPremium.GetBool() {
+		return allGuildsOncePremiumAllPremiumEnabled()
+	}
+
 	var result []int64
 	err := common.RedisPool.Do(retryableredis.Cmd(&result, "ZRANGE", RedisKeyPremiumGuildLastActive, "0", "-1", "WITHSCORES"))
 	if err != nil {
-		return nil, errors.Wrap(err, "zrange")
+		return nil, errors.WrapIf(err, "zrange")
 	}
 
 	parsed := make(map[int64]time.Time)
@@ -80,6 +128,22 @@ func AllGuildsOncePremium() (map[int64]time.Time, error) {
 	}
 
 	return parsed, nil
+}
+
+func allGuildsOncePremiumAllPremiumEnabled() (map[int64]time.Time, error) {
+	var listedServers []int64
+	err := common.RedisPool.Do(retryableredis.Cmd(&listedServers, "SMEMBERS", "connected_guilds"))
+	if err != nil {
+		return nil, err
+	}
+
+	results := make(map[int64]time.Time)
+	for _, v := range listedServers {
+		results[v] = time.Now()
+	}
+
+	return results, nil
+
 }
 
 // UserPremiumSlots returns all slots for a user

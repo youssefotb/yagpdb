@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
+	"emperror.dev/errors"
 	"github.com/volatiletech/null"
 	"github.com/volatiletech/sqlboiler/boil"
 	"github.com/volatiletech/sqlboiler/queries"
@@ -105,12 +105,12 @@ var VerificationSessionWhere = struct {
 	SolvedAt  whereHelpernull_Time
 	ExpiredAt whereHelpernull_Time
 }{
-	Token:     whereHelperstring{field: `token`},
-	UserID:    whereHelperint64{field: `user_id`},
-	GuildID:   whereHelperint64{field: `guild_id`},
-	CreatedAt: whereHelpertime_Time{field: `created_at`},
-	SolvedAt:  whereHelpernull_Time{field: `solved_at`},
-	ExpiredAt: whereHelpernull_Time{field: `expired_at`},
+	Token:     whereHelperstring{field: "\"verification_sessions\".\"token\""},
+	UserID:    whereHelperint64{field: "\"verification_sessions\".\"user_id\""},
+	GuildID:   whereHelperint64{field: "\"verification_sessions\".\"guild_id\""},
+	CreatedAt: whereHelpertime_Time{field: "\"verification_sessions\".\"created_at\""},
+	SolvedAt:  whereHelpernull_Time{field: "\"verification_sessions\".\"solved_at\""},
+	ExpiredAt: whereHelpernull_Time{field: "\"verification_sessions\".\"expired_at\""},
 }
 
 // VerificationSessionRels is where relationship names are stored.
@@ -130,7 +130,7 @@ func (*verificationSessionR) NewStruct() *verificationSessionR {
 type verificationSessionL struct{}
 
 var (
-	verificationSessionColumns               = []string{"token", "user_id", "guild_id", "created_at", "solved_at", "expired_at"}
+	verificationSessionAllColumns            = []string{"token", "user_id", "guild_id", "created_at", "solved_at", "expired_at"}
 	verificationSessionColumnsWithoutDefault = []string{"token", "user_id", "guild_id", "created_at", "solved_at", "expired_at"}
 	verificationSessionColumnsWithDefault    = []string{}
 	verificationSessionPrimaryKeyColumns     = []string{"token"}
@@ -183,7 +183,7 @@ func (q verificationSessionQuery) One(ctx context.Context, exec boil.ContextExec
 		if errors.Cause(err) == sql.ErrNoRows {
 			return nil, sql.ErrNoRows
 		}
-		return nil, errors.Wrap(err, "models: failed to execute a one query for verification_sessions")
+		return nil, errors.WrapIf(err, "models: failed to execute a one query for verification_sessions")
 	}
 
 	return o, nil
@@ -200,7 +200,7 @@ func (q verificationSessionQuery) All(ctx context.Context, exec boil.ContextExec
 
 	err := q.Bind(ctx, exec, &o)
 	if err != nil {
-		return nil, errors.Wrap(err, "models: failed to assign all query results to VerificationSession slice")
+		return nil, errors.WrapIf(err, "models: failed to assign all query results to VerificationSession slice")
 	}
 
 	return o, nil
@@ -220,7 +220,7 @@ func (q verificationSessionQuery) Count(ctx context.Context, exec boil.ContextEx
 
 	err := q.Query.QueryRowContext(ctx, exec).Scan(&count)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to count verification_sessions rows")
+		return 0, errors.WrapIf(err, "models: failed to count verification_sessions rows")
 	}
 
 	return count, nil
@@ -241,7 +241,7 @@ func (q verificationSessionQuery) Exists(ctx context.Context, exec boil.ContextE
 
 	err := q.Query.QueryRowContext(ctx, exec).Scan(&count)
 	if err != nil {
-		return false, errors.Wrap(err, "models: failed to check if verification_sessions exists")
+		return false, errors.WrapIf(err, "models: failed to check if verification_sessions exists")
 	}
 
 	return count > 0, nil
@@ -278,7 +278,7 @@ func FindVerificationSession(ctx context.Context, exec boil.ContextExecutor, tok
 		if errors.Cause(err) == sql.ErrNoRows {
 			return nil, sql.ErrNoRows
 		}
-		return nil, errors.Wrap(err, "models: unable to select from verification_sessions")
+		return nil, errors.WrapIf(err, "models: unable to select from verification_sessions")
 	}
 
 	return verificationSessionObj, nil
@@ -314,7 +314,7 @@ func (o *VerificationSession) Insert(ctx context.Context, exec boil.ContextExecu
 
 	if !cached {
 		wl, returnColumns := columns.InsertColumnSet(
-			verificationSessionColumns,
+			verificationSessionAllColumns,
 			verificationSessionColumnsWithDefault,
 			verificationSessionColumnsWithoutDefault,
 			nzDefaults,
@@ -358,7 +358,7 @@ func (o *VerificationSession) Insert(ctx context.Context, exec boil.ContextExecu
 	}
 
 	if err != nil {
-		return errors.Wrap(err, "models: unable to insert into verification_sessions")
+		return errors.WrapIf(err, "models: unable to insert into verification_sessions")
 	}
 
 	if !cached {
@@ -388,7 +388,7 @@ func (o *VerificationSession) Update(ctx context.Context, exec boil.ContextExecu
 
 	if !cached {
 		wl := columns.UpdateColumnSet(
-			verificationSessionColumns,
+			verificationSessionAllColumns,
 			verificationSessionPrimaryKeyColumns,
 		)
 
@@ -419,12 +419,12 @@ func (o *VerificationSession) Update(ctx context.Context, exec boil.ContextExecu
 	var result sql.Result
 	result, err = exec.ExecContext(ctx, cache.query, values...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to update verification_sessions row")
+		return 0, errors.WrapIf(err, "models: unable to update verification_sessions row")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by update for verification_sessions")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by update for verification_sessions")
 	}
 
 	if !cached {
@@ -447,12 +447,12 @@ func (q verificationSessionQuery) UpdateAll(ctx context.Context, exec boil.Conte
 
 	result, err := q.Query.ExecContext(ctx, exec)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to update all for verification_sessions")
+		return 0, errors.WrapIf(err, "models: unable to update all for verification_sessions")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to retrieve rows affected for verification_sessions")
+		return 0, errors.WrapIf(err, "models: unable to retrieve rows affected for verification_sessions")
 	}
 
 	return rowsAff, nil
@@ -501,12 +501,12 @@ func (o VerificationSessionSlice) UpdateAll(ctx context.Context, exec boil.Conte
 
 	result, err := exec.ExecContext(ctx, sql, args...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to update all in verificationSession slice")
+		return 0, errors.WrapIf(err, "models: unable to update all in verificationSession slice")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to retrieve rows affected all in update all verificationSession")
+		return 0, errors.WrapIf(err, "models: unable to retrieve rows affected all in update all verificationSession")
 	}
 	return rowsAff, nil
 }
@@ -568,13 +568,13 @@ func (o *VerificationSession) Upsert(ctx context.Context, exec boil.ContextExecu
 
 	if !cached {
 		insert, ret := insertColumns.InsertColumnSet(
-			verificationSessionColumns,
+			verificationSessionAllColumns,
 			verificationSessionColumnsWithDefault,
 			verificationSessionColumnsWithoutDefault,
 			nzDefaults,
 		)
 		update := updateColumns.UpdateColumnSet(
-			verificationSessionColumns,
+			verificationSessionAllColumns,
 			verificationSessionPrimaryKeyColumns,
 		)
 
@@ -622,7 +622,7 @@ func (o *VerificationSession) Upsert(ctx context.Context, exec boil.ContextExecu
 		_, err = exec.ExecContext(ctx, cache.query, vals...)
 	}
 	if err != nil {
-		return errors.Wrap(err, "models: unable to upsert verification_sessions")
+		return errors.WrapIf(err, "models: unable to upsert verification_sessions")
 	}
 
 	if !cached {
@@ -657,12 +657,12 @@ func (o *VerificationSession) Delete(ctx context.Context, exec boil.ContextExecu
 
 	result, err := exec.ExecContext(ctx, sql, args...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to delete from verification_sessions")
+		return 0, errors.WrapIf(err, "models: unable to delete from verification_sessions")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by delete for verification_sessions")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by delete for verification_sessions")
 	}
 
 	return rowsAff, nil
@@ -678,12 +678,12 @@ func (q verificationSessionQuery) DeleteAll(ctx context.Context, exec boil.Conte
 
 	result, err := q.Query.ExecContext(ctx, exec)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to delete all from verification_sessions")
+		return 0, errors.WrapIf(err, "models: unable to delete all from verification_sessions")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by deleteall for verification_sessions")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by deleteall for verification_sessions")
 	}
 
 	return rowsAff, nil
@@ -696,10 +696,6 @@ func (o VerificationSessionSlice) DeleteAllG(ctx context.Context) (int64, error)
 
 // DeleteAll deletes all rows in the slice, using an executor.
 func (o VerificationSessionSlice) DeleteAll(ctx context.Context, exec boil.ContextExecutor) (int64, error) {
-	if o == nil {
-		return 0, errors.New("models: no VerificationSession slice provided for delete all")
-	}
-
 	if len(o) == 0 {
 		return 0, nil
 	}
@@ -720,12 +716,12 @@ func (o VerificationSessionSlice) DeleteAll(ctx context.Context, exec boil.Conte
 
 	result, err := exec.ExecContext(ctx, sql, args...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to delete all from verificationSession slice")
+		return 0, errors.WrapIf(err, "models: unable to delete all from verificationSession slice")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by deleteall for verification_sessions")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by deleteall for verification_sessions")
 	}
 
 	return rowsAff, nil
@@ -783,7 +779,7 @@ func (o *VerificationSessionSlice) ReloadAll(ctx context.Context, exec boil.Cont
 
 	err := q.Bind(ctx, exec, &slice)
 	if err != nil {
-		return errors.Wrap(err, "models: unable to reload all in VerificationSessionSlice")
+		return errors.WrapIf(err, "models: unable to reload all in VerificationSessionSlice")
 	}
 
 	*o = slice
@@ -810,7 +806,7 @@ func VerificationSessionExists(ctx context.Context, exec boil.ContextExecutor, t
 
 	err := row.Scan(&exists)
 	if err != nil {
-		return false, errors.Wrap(err, "models: unable to check if verification_sessions exists")
+		return false, errors.WrapIf(err, "models: unable to check if verification_sessions exists")
 	}
 
 	return exists, nil

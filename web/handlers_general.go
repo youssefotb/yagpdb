@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/bot/botrest"
@@ -20,7 +21,6 @@ import (
 	"github.com/jonas747/yagpdb/common/patreon"
 	"github.com/jonas747/yagpdb/web/discordblog"
 	"github.com/patrickmn/go-cache"
-	"github.com/pkg/errors"
 	"goji.io/pat"
 )
 
@@ -167,7 +167,7 @@ func HandleReconnectShard(w http.ResponseWriter, r *http.Request) (TemplateData,
 
 	if user := ctx.Value(common.ContextKeyUser); user != nil {
 		cast := user.(*discordgo.User)
-		if cast.ID != int64(common.ConfOwner.GetInt()) {
+		if !common.IsOwner(cast.ID) {
 			return HandleStatus(w, r)
 		}
 	} else {

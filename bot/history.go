@@ -2,6 +2,7 @@ package bot
 
 import (
 	"sort"
+	"time"
 
 	"github.com/jonas747/dstate"
 	"github.com/jonas747/yagpdb/common"
@@ -46,12 +47,12 @@ func GetMessages(channelID int64, limit int, deleted bool) ([]*dstate.MessageSta
 	cs.Owner.RUnlock()
 
 	// Check if the state was full
-	if n >= limit {
+	if n < 0 {
 		return msgBuf, nil
 	}
 
 	// Not enough messages in state, retrieve them from the api
-	// Initialize the before id
+	// Initialize the before id to the oldest message we have
 	var before int64
 	if n+1 < len(msgBuf) {
 		if msgBuf[n+1] != nil {
@@ -96,6 +97,11 @@ func GetMessages(channelID int64, limit int, deleted bool) ([]*dstate.MessageSta
 		msgBuf = msgBuf[n+1:]
 	}
 
+	maxChannelMessages, maxMessageAge := State.MaxChannelMessages, State.MaxMessageAge
+	if State.CustomLimitProvider != nil {
+		maxChannelMessages, maxMessageAge = State.CustomLimitProvider.MessageLimits(cs)
+	}
+
 	// merge the current state with this new one and sort
 	cs.Owner.Lock()
 	defer cs.Owner.Unlock()
@@ -111,12 +117,7 @@ func GetMessages(channelID int64, limit int, deleted bool) ([]*dstate.MessageSta
 
 	sort.Sort(DiscordMessages(cs.Messages))
 
-	maxChannelMessages, maxMessageAge := State.MaxChannelMessages, State.MaxMessageAge
-	if State.CustomLimitProvider != nil {
-		maxChannelMessages, maxMessageAge = State.CustomLimitProvider.MessageLimits(cs)
-	}
-
-	cs.UpdateMessages(false, maxChannelMessages, maxMessageAge)
+	cs.UpdateMessages(false, maxChannelMessages, time.Now().Add(-maxMessageAge))
 
 	// Return at most limit results
 	if limit < len(msgBuf) {

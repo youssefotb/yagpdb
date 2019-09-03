@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
+	"emperror.dev/errors"
 	"github.com/volatiletech/sqlboiler/boil"
 	"github.com/volatiletech/sqlboiler/queries"
 	"github.com/volatiletech/sqlboiler/queries/qm"
@@ -60,12 +60,12 @@ var TicketParticipantWhere = struct {
 	Discrim       whereHelperstring
 	IsStaff       whereHelperbool
 }{
-	TicketGuildID: whereHelperint64{field: `ticket_guild_id`},
-	TicketLocalID: whereHelperint64{field: `ticket_local_id`},
-	UserID:        whereHelperint64{field: `user_id`},
-	Username:      whereHelperstring{field: `username`},
-	Discrim:       whereHelperstring{field: `discrim`},
-	IsStaff:       whereHelperbool{field: `is_staff`},
+	TicketGuildID: whereHelperint64{field: "\"ticket_participants\".\"ticket_guild_id\""},
+	TicketLocalID: whereHelperint64{field: "\"ticket_participants\".\"ticket_local_id\""},
+	UserID:        whereHelperint64{field: "\"ticket_participants\".\"user_id\""},
+	Username:      whereHelperstring{field: "\"ticket_participants\".\"username\""},
+	Discrim:       whereHelperstring{field: "\"ticket_participants\".\"discrim\""},
+	IsStaff:       whereHelperbool{field: "\"ticket_participants\".\"is_staff\""},
 }
 
 // TicketParticipantRels is where relationship names are stored.
@@ -85,7 +85,7 @@ func (*ticketParticipantR) NewStruct() *ticketParticipantR {
 type ticketParticipantL struct{}
 
 var (
-	ticketParticipantColumns               = []string{"ticket_guild_id", "ticket_local_id", "user_id", "username", "discrim", "is_staff"}
+	ticketParticipantAllColumns            = []string{"ticket_guild_id", "ticket_local_id", "user_id", "username", "discrim", "is_staff"}
 	ticketParticipantColumnsWithoutDefault = []string{"ticket_guild_id", "ticket_local_id", "user_id", "username", "discrim", "is_staff"}
 	ticketParticipantColumnsWithDefault    = []string{}
 	ticketParticipantPrimaryKeyColumns     = []string{"ticket_guild_id", "ticket_local_id", "user_id"}
@@ -138,7 +138,7 @@ func (q ticketParticipantQuery) One(ctx context.Context, exec boil.ContextExecut
 		if errors.Cause(err) == sql.ErrNoRows {
 			return nil, sql.ErrNoRows
 		}
-		return nil, errors.Wrap(err, "models: failed to execute a one query for ticket_participants")
+		return nil, errors.WrapIf(err, "models: failed to execute a one query for ticket_participants")
 	}
 
 	return o, nil
@@ -155,7 +155,7 @@ func (q ticketParticipantQuery) All(ctx context.Context, exec boil.ContextExecut
 
 	err := q.Bind(ctx, exec, &o)
 	if err != nil {
-		return nil, errors.Wrap(err, "models: failed to assign all query results to TicketParticipant slice")
+		return nil, errors.WrapIf(err, "models: failed to assign all query results to TicketParticipant slice")
 	}
 
 	return o, nil
@@ -175,7 +175,7 @@ func (q ticketParticipantQuery) Count(ctx context.Context, exec boil.ContextExec
 
 	err := q.Query.QueryRowContext(ctx, exec).Scan(&count)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to count ticket_participants rows")
+		return 0, errors.WrapIf(err, "models: failed to count ticket_participants rows")
 	}
 
 	return count, nil
@@ -196,7 +196,7 @@ func (q ticketParticipantQuery) Exists(ctx context.Context, exec boil.ContextExe
 
 	err := q.Query.QueryRowContext(ctx, exec).Scan(&count)
 	if err != nil {
-		return false, errors.Wrap(err, "models: failed to check if ticket_participants exists")
+		return false, errors.WrapIf(err, "models: failed to check if ticket_participants exists")
 	}
 
 	return count > 0, nil
@@ -233,7 +233,7 @@ func FindTicketParticipant(ctx context.Context, exec boil.ContextExecutor, ticke
 		if errors.Cause(err) == sql.ErrNoRows {
 			return nil, sql.ErrNoRows
 		}
-		return nil, errors.Wrap(err, "models: unable to select from ticket_participants")
+		return nil, errors.WrapIf(err, "models: unable to select from ticket_participants")
 	}
 
 	return ticketParticipantObj, nil
@@ -262,7 +262,7 @@ func (o *TicketParticipant) Insert(ctx context.Context, exec boil.ContextExecuto
 
 	if !cached {
 		wl, returnColumns := columns.InsertColumnSet(
-			ticketParticipantColumns,
+			ticketParticipantAllColumns,
 			ticketParticipantColumnsWithDefault,
 			ticketParticipantColumnsWithoutDefault,
 			nzDefaults,
@@ -306,7 +306,7 @@ func (o *TicketParticipant) Insert(ctx context.Context, exec boil.ContextExecuto
 	}
 
 	if err != nil {
-		return errors.Wrap(err, "models: unable to insert into ticket_participants")
+		return errors.WrapIf(err, "models: unable to insert into ticket_participants")
 	}
 
 	if !cached {
@@ -336,7 +336,7 @@ func (o *TicketParticipant) Update(ctx context.Context, exec boil.ContextExecuto
 
 	if !cached {
 		wl := columns.UpdateColumnSet(
-			ticketParticipantColumns,
+			ticketParticipantAllColumns,
 			ticketParticipantPrimaryKeyColumns,
 		)
 
@@ -367,12 +367,12 @@ func (o *TicketParticipant) Update(ctx context.Context, exec boil.ContextExecuto
 	var result sql.Result
 	result, err = exec.ExecContext(ctx, cache.query, values...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to update ticket_participants row")
+		return 0, errors.WrapIf(err, "models: unable to update ticket_participants row")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by update for ticket_participants")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by update for ticket_participants")
 	}
 
 	if !cached {
@@ -395,12 +395,12 @@ func (q ticketParticipantQuery) UpdateAll(ctx context.Context, exec boil.Context
 
 	result, err := q.Query.ExecContext(ctx, exec)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to update all for ticket_participants")
+		return 0, errors.WrapIf(err, "models: unable to update all for ticket_participants")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to retrieve rows affected for ticket_participants")
+		return 0, errors.WrapIf(err, "models: unable to retrieve rows affected for ticket_participants")
 	}
 
 	return rowsAff, nil
@@ -449,12 +449,12 @@ func (o TicketParticipantSlice) UpdateAll(ctx context.Context, exec boil.Context
 
 	result, err := exec.ExecContext(ctx, sql, args...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to update all in ticketParticipant slice")
+		return 0, errors.WrapIf(err, "models: unable to update all in ticketParticipant slice")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to retrieve rows affected all in update all ticketParticipant")
+		return 0, errors.WrapIf(err, "models: unable to retrieve rows affected all in update all ticketParticipant")
 	}
 	return rowsAff, nil
 }
@@ -509,13 +509,13 @@ func (o *TicketParticipant) Upsert(ctx context.Context, exec boil.ContextExecuto
 
 	if !cached {
 		insert, ret := insertColumns.InsertColumnSet(
-			ticketParticipantColumns,
+			ticketParticipantAllColumns,
 			ticketParticipantColumnsWithDefault,
 			ticketParticipantColumnsWithoutDefault,
 			nzDefaults,
 		)
 		update := updateColumns.UpdateColumnSet(
-			ticketParticipantColumns,
+			ticketParticipantAllColumns,
 			ticketParticipantPrimaryKeyColumns,
 		)
 
@@ -563,7 +563,7 @@ func (o *TicketParticipant) Upsert(ctx context.Context, exec boil.ContextExecuto
 		_, err = exec.ExecContext(ctx, cache.query, vals...)
 	}
 	if err != nil {
-		return errors.Wrap(err, "models: unable to upsert ticket_participants")
+		return errors.WrapIf(err, "models: unable to upsert ticket_participants")
 	}
 
 	if !cached {
@@ -598,12 +598,12 @@ func (o *TicketParticipant) Delete(ctx context.Context, exec boil.ContextExecuto
 
 	result, err := exec.ExecContext(ctx, sql, args...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to delete from ticket_participants")
+		return 0, errors.WrapIf(err, "models: unable to delete from ticket_participants")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by delete for ticket_participants")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by delete for ticket_participants")
 	}
 
 	return rowsAff, nil
@@ -619,12 +619,12 @@ func (q ticketParticipantQuery) DeleteAll(ctx context.Context, exec boil.Context
 
 	result, err := q.Query.ExecContext(ctx, exec)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to delete all from ticket_participants")
+		return 0, errors.WrapIf(err, "models: unable to delete all from ticket_participants")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by deleteall for ticket_participants")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by deleteall for ticket_participants")
 	}
 
 	return rowsAff, nil
@@ -637,10 +637,6 @@ func (o TicketParticipantSlice) DeleteAllG(ctx context.Context) (int64, error) {
 
 // DeleteAll deletes all rows in the slice, using an executor.
 func (o TicketParticipantSlice) DeleteAll(ctx context.Context, exec boil.ContextExecutor) (int64, error) {
-	if o == nil {
-		return 0, errors.New("models: no TicketParticipant slice provided for delete all")
-	}
-
 	if len(o) == 0 {
 		return 0, nil
 	}
@@ -661,12 +657,12 @@ func (o TicketParticipantSlice) DeleteAll(ctx context.Context, exec boil.Context
 
 	result, err := exec.ExecContext(ctx, sql, args...)
 	if err != nil {
-		return 0, errors.Wrap(err, "models: unable to delete all from ticketParticipant slice")
+		return 0, errors.WrapIf(err, "models: unable to delete all from ticketParticipant slice")
 	}
 
 	rowsAff, err := result.RowsAffected()
 	if err != nil {
-		return 0, errors.Wrap(err, "models: failed to get rows affected by deleteall for ticket_participants")
+		return 0, errors.WrapIf(err, "models: failed to get rows affected by deleteall for ticket_participants")
 	}
 
 	return rowsAff, nil
@@ -724,7 +720,7 @@ func (o *TicketParticipantSlice) ReloadAll(ctx context.Context, exec boil.Contex
 
 	err := q.Bind(ctx, exec, &slice)
 	if err != nil {
-		return errors.Wrap(err, "models: unable to reload all in TicketParticipantSlice")
+		return errors.WrapIf(err, "models: unable to reload all in TicketParticipantSlice")
 	}
 
 	*o = slice
@@ -751,7 +747,7 @@ func TicketParticipantExists(ctx context.Context, exec boil.ContextExecutor, tic
 
 	err := row.Scan(&exists)
 	if err != nil {
-		return false, errors.Wrap(err, "models: unable to check if ticket_participants exists")
+		return false, errors.WrapIf(err, "models: unable to check if ticket_participants exists")
 	}
 
 	return exists, nil

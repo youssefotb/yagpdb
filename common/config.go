@@ -1,13 +1,15 @@
 package common
 
 import (
+	"emperror.dev/errors"
 	"github.com/jonas747/yagpdb/common/config"
-	"github.com/pkg/errors"
+	"strconv"
 	"strings"
 )
 
 var (
-	ConfOwner = config.RegisterOption("yagpdb.owner", "ID of the owner of the bot", nil)
+	confOwner  = config.RegisterOption("yagpdb.owner", "ID of the owner of the bot", 0)
+	confOwners = config.RegisterOption("yagpdb.owners", "Comma seperated IDs of the owners of the bot", "")
 
 	ConfClientID     = config.RegisterOption("yagpdb.clientid", "Client ID of the discord application", nil)
 	ConfClientSecret = config.RegisterOption("yagpdb.clientsecret", "Client Secret of the discord application", nil)
@@ -25,6 +27,9 @@ var (
 	ConfDisableKeepalives = config.RegisterOption("yagpdb.disable_keepalives", "Disables keepalive connections for outgoing requests to discord, this shouldn't be needed but i had networking issues once so i had to", false)
 
 	ConfDogStatsdAddress = config.RegisterOption("yagpdb.dogstatsdaddress", "dogstatsd address", "")
+	confNoSchemaInit     = config.RegisterOption("yagpdb.no_schema_init", "Disable schema intiialization", false)
+
+	BotOwners []int64
 )
 
 var configLoaded = false
@@ -40,7 +45,6 @@ func LoadConfig() (err error) {
 	config.Load()
 
 	requiredConf := []*config.ConfigOption{
-		ConfOwner,
 		ConfClientID,
 		ConfClientSecret,
 		ConfBotToken,
@@ -51,6 +55,19 @@ func LoadConfig() (err error) {
 		if v.LoadedValue == nil {
 			envFormat := strings.ToUpper(strings.Replace(v.Name, ".", "_", -1))
 			return errors.Errorf("Did not set required config option: %q (%s as env var)", v.Name, envFormat)
+		}
+	}
+
+	if int64(confOwner.GetInt()) != 0 {
+		BotOwners = append(BotOwners, int64(confOwner.GetInt()))
+	}
+
+	ownersStr := confOwners.GetString()
+	split := strings.Split(ownersStr, ",")
+	for _, o := range split {
+		parsed, _ := strconv.ParseInt(o, 10, 64)
+		if parsed != 0 {
+			BotOwners = append(BotOwners, parsed)
 		}
 	}
 
