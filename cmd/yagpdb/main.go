@@ -5,17 +5,17 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/evalphobia/logrus_sentry"
-	"github.com/jonas747/yagpdb/automod"
-	"github.com/jonas747/yagpdb/safebrowsing"
 	log "github.com/sirupsen/logrus"
 
 	// Core yagpdb packages
+	"github.com/jonas747/yagpdb/admin"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/bot/botrest"
 	"github.com/jonas747/yagpdb/bot/paginatedmessages"
@@ -23,6 +23,7 @@ import (
 	"github.com/jonas747/yagpdb/common/backgroundworkers"
 	"github.com/jonas747/yagpdb/common/config"
 	"github.com/jonas747/yagpdb/common/configstore"
+	"github.com/jonas747/yagpdb/common/internalapi"
 	"github.com/jonas747/yagpdb/common/mqueue"
 	"github.com/jonas747/yagpdb/common/pubsub"
 	"github.com/jonas747/yagpdb/common/scheduledevents2"
@@ -30,6 +31,7 @@ import (
 	"github.com/jonas747/yagpdb/web"
 
 	// Plugin imports
+	"github.com/jonas747/yagpdb/automod"
 	"github.com/jonas747/yagpdb/automod_legacy"
 	"github.com/jonas747/yagpdb/autorole"
 	"github.com/jonas747/yagpdb/aylien"
@@ -47,6 +49,7 @@ import (
 	"github.com/jonas747/yagpdb/reputation"
 	"github.com/jonas747/yagpdb/rolecommands"
 	"github.com/jonas747/yagpdb/rsvp"
+	"github.com/jonas747/yagpdb/safebrowsing"
 	"github.com/jonas747/yagpdb/serverstats"
 	"github.com/jonas747/yagpdb/soundboard"
 	"github.com/jonas747/yagpdb/stdcommands"
@@ -116,26 +119,11 @@ func main() {
 	common.SetLogFormatter(&log.TextFormatter{
 		DisableTimestamp: !common.Testing,
 		ForceColors:      common.Testing,
+		SortingFunc:      logrusSortingFunc,
 	})
 
 	if flagSysLog {
 		AddSyslogHooks()
-	}
-
-	config.Load()
-	if confSentryDSN.GetString() != "" {
-		hook, err := logrus_sentry.NewSentryHook(confSentryDSN.GetString(), []log.Level{
-			log.PanicLevel,
-			log.FatalLevel,
-			log.ErrorLevel,
-		})
-
-		if err == nil {
-			common.AddLogHook(hook)
-			log.Info("Added Sentry Hook")
-		} else {
-			log.WithError(err).Error("Failed adding sentry hook")
-		}
 	}
 
 	if !flagRunBot && !flagRunWeb && flagRunFeeds == "" && !flagRunEverything && !flagDryRun && !flagRunBWC && !flagGenConfigDocs {
@@ -145,7 +133,16 @@ func main() {
 
 	log.Info("Starting YAGPDB version " + common.VERSION)
 
-	err := common.Init()
+	err := common.CoreInit()
+	if err != nil {
+		log.WithError(err).Fatal("Failed running core init ")
+	}
+
+	if confSentryDSN.GetString() != "" {
+		addSentryHook()
+	}
+
+	err = common.Init()
 	if err != nil {
 		log.WithError(err).Fatal("Failed intializing")
 	}
@@ -188,6 +185,8 @@ func main() {
 	twitter.RegisterPlugin()
 	rsvp.RegisterPlugin()
 	timezonecompanion.RegisterPlugin()
+	admin.RegisterPlugin()
+	internalapi.RegisterPlugin()
 
 	if flagDryRun {
 		log.Println("This is a dry run, exiting")
@@ -230,6 +229,9 @@ func main() {
 
 	go pubsub.PollEvents()
 
+	common.RunCommonRunPlugins()
+
+	common.SetShutdownFunc(shutdown)
 	listenSignal()
 }
 
@@ -240,8 +242,12 @@ func listenSignal() {
 	c := make(chan os.Signal, 2)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
-	sig := <-c
-	log.Info("SHUTTING DOWN... ", sig.String())
+	<-c
+	common.Shutdown()
+}
+
+func shutdown() {
+	log.Info("SHUTTING DOWN... ")
 
 	shouldWait := false
 	wg := new(sync.WaitGroup)
@@ -280,4 +286,56 @@ func listenSignal() {
 
 	log.Info("Bye..")
 	os.Exit(0)
+}
+
+func addSentryHook() {
+	hook, err := logrus_sentry.NewSentryHook(confSentryDSN.GetString(), []log.Level{
+		log.PanicLevel,
+		log.FatalLevel,
+		log.ErrorLevel,
+	})
+
+	if err == nil {
+		common.AddLogHook(hook)
+		log.Info("Added Sentry Hook")
+	} else {
+		log.WithError(err).Error("Failed adding sentry hook")
+	}
+}
+
+var logSortPriority = []string{
+	"time",
+	"level",
+	"p",
+	"msg",
+	"stck",
+}
+
+func logrusSortingFunc(fields []string) {
+	sort.Slice(fields, func(i, j int) bool {
+
+		iPriority := findStringIndex(logSortPriority, fields[i])
+		jPriority := findStringIndex(logSortPriority, fields[j])
+
+		if iPriority != -1 && jPriority == -1 {
+			return true
+		} else if jPriority != -1 && iPriority == -1 {
+			return false
+		} else if iPriority == -1 && jPriority == -1 {
+			return strings.Compare(fields[i], fields[j]) > 1
+		}
+
+		// both has priority
+		return iPriority < jPriority
+	})
+}
+
+func findStringIndex(slice []string, s string) int {
+	for i, v := range slice {
+		if v == s {
+			return i
+		}
+	}
+
+	return -1
 }

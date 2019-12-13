@@ -9,7 +9,6 @@ import (
 	"emperror.dev/errors"
 
 	"github.com/jonas747/discordgo"
-	"github.com/jonas747/dshardorchestrator"
 	"github.com/jonas747/dstate"
 	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/bot"
@@ -23,23 +22,12 @@ import (
 func KeyCurrentlyStreaming(gID int64) string { return "currently_streaming:" + discordgo.StrID(gID) }
 
 var _ bot.BotInitHandler = (*Plugin)(nil)
-var _ bot.ShardMigrationReceiver = (*Plugin)(nil)
 
 func (p *Plugin) BotInit() {
 	eventsystem.AddHandlerAsyncLastLegacy(p, bot.ConcurrentEventHandler(HandleGuildCreate), eventsystem.EventGuildCreate)
 	eventsystem.AddHandlerAsyncLast(p, HandlePresenceUpdate, eventsystem.EventPresenceUpdate)
 	eventsystem.AddHandlerAsyncLast(p, HandleGuildMemberUpdate, eventsystem.EventGuildMemberUpdate)
 	pubsub.AddHandler("update_streaming", HandleUpdateStreaming, nil)
-}
-
-func (p *Plugin) ShardMigrationReceive(evt dshardorchestrator.EventType, data interface{}) {
-	if evt != bot.EvtGuildState {
-		return
-	}
-
-	gs := data.(*dstate.GuildState)
-
-	go CheckGuildFull(gs, false)
 }
 
 // YAGPDB event
@@ -247,7 +235,7 @@ func CheckPresence(client radix.Client, config *Config, ms *dstate.MemberState, 
 
 	// Now the real fun starts
 	// Either add or remove the stream
-	if ms.PresenceStatus != dstate.StatusOffline && ms.PresenceGame != nil && ms.PresenceGame.URL != "" {
+	if ms.PresenceStatus != dstate.StatusOffline && ms.PresenceGame != nil && ms.PresenceGame.URL != "" && ms.PresenceGame.Type == 1 {
 		// Streaming
 
 		if !config.MeetsRequirements(ms) {
@@ -298,7 +286,7 @@ func (config *Config) MeetsRequirements(ms *dstate.MemberState) bool {
 	}
 
 	if strings.TrimSpace(config.GameRegex) != "" {
-		gameName := ms.PresenceGame.Details
+		gameName := ms.PresenceGame.State
 		compiledRegex, err := regexp.Compile(strings.TrimSpace(config.GameRegex))
 		if err == nil {
 			// It should be verified before this that its valid
@@ -309,7 +297,7 @@ func (config *Config) MeetsRequirements(ms *dstate.MemberState) bool {
 	}
 
 	if strings.TrimSpace(config.TitleRegex) != "" {
-		streamTitle := ms.PresenceGame.Name
+		streamTitle := ms.PresenceGame.Details
 		compiledRegex, err := regexp.Compile(strings.TrimSpace(config.TitleRegex))
 		if err == nil {
 			// It should be verified before this that its valid
@@ -371,8 +359,9 @@ func SendStreamingAnnouncement(config *Config, guild *dstate.GuildState, ms *dst
 	ctx := templates.NewContext(guild, nil, ms)
 	ctx.Data["URL"] = common.EscapeSpecialMentions(ms.PresenceGame.URL)
 	ctx.Data["url"] = common.EscapeSpecialMentions(ms.PresenceGame.URL)
-	ctx.Data["Game"] = ms.PresenceGame.Details
-	ctx.Data["StreamTitle"] = ms.PresenceGame.Name
+	ctx.Data["Game"] = ms.PresenceGame.State
+	ctx.Data["StreamTitle"] = ms.PresenceGame.Details
+	ctx.Data["StreamPlatform"] = ms.PresenceGame.Name
 
 	guild.RUnlock()
 	out, err := ctx.Execute(config.AnnounceMessage)

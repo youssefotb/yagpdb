@@ -646,6 +646,27 @@ func (c *Context) tmplGetMember(id interface{}) (*discordgo.Member, error) {
 	return member.DGoCopy(), nil
 }
 
+func (c *Context) tmplGetChannel ( channel interface {}) (*dstate.ChannelState, error) {
+	
+	if c.IncreaseCheckGenericAPICall() {
+		return nil, ErrTooManyAPICalls
+	}
+
+	cID := c.ChannelArg(channel)
+	if cID == 0 {
+                return nil, nil //dont send an error , a nil output would indicate invalid/unknown channel
+        }
+
+	cstate := c.GS.ChannelCopy(true, cID)
+
+	if cstate == nil {
+		return nil, errors.New("Channel not in state")
+	}
+	
+	return cstate, nil
+
+}
+
 func (c *Context) tmplAddReactions(values ...reflect.Value) (reflect.Value, error) {
 	f := func(args []reflect.Value) (reflect.Value, error) {
 		if c.Msg == nil {
@@ -832,6 +853,28 @@ func (c *Context) tmplEditChannelName(channel interface{}, newName string) (stri
 	return "", err
 }
 
+func (c *Context) tmplEditChannelTopic(channel interface{}, newTopic string) (string, error) {
+        if c.IncreaseCheckCallCounter("edit_channel", 10) {
+                return "", ErrTooManyCalls
+        }
+
+        cID := c.ChannelArg(channel)
+        if cID == 0 {
+                return "", errors.New("Unknown channel")
+        }
+
+        if c.IncreaseCheckCallCounter("edit_channel_"+strconv.FormatInt(cID, 10), 2) {
+                return "", ErrTooManyCalls
+        }
+
+	edit := &discordgo.ChannelEdit{
+		Topic: newTopic,
+	}
+
+        _, err := common.BotSession.ChannelEditComplex(cID, edit)
+        return "", err
+}
+
 func (c *Context) tmplOnlineCount() (int, error) {
 	if c.IncreaseCheckCallCounter("online_users", 1) {
 		return 0, ErrTooManyCalls
@@ -868,3 +911,26 @@ func (c *Context) tmplOnlineCountBots() (int, error) {
 	return botCount, nil
 }
 
+func (c *Context) tmplEditNickname(Nickname string) (string, error) {
+
+	if c.IncreaseCheckCallCounter("edit_nick", 2) {
+		return "", ErrTooManyCalls
+	}
+
+		if c.MS == nil {
+		return "", nil
+	}
+	
+	if strings.Compare(c.MS.Nick, Nickname) == 0 {
+	
+		return "", nil
+	
+	}
+	
+	err := common.BotSession.GuildMemberNickname(c.GS.ID, c.MS.ID, Nickname)
+	if err != nil {
+		return "", err
+	}
+
+	return "", nil
+}

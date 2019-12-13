@@ -11,7 +11,6 @@ import (
 
 	"github.com/NYTimes/gziphandler"
 	"github.com/jonas747/discordgo"
-	"github.com/jonas747/yagpdb/bot/botrest"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/config"
 	"github.com/jonas747/yagpdb/common/patreon"
@@ -55,11 +54,12 @@ var (
 	confAnnouncementsChannel       = config.RegisterOption("yagpdb.announcements_channel", "Channel to pull announcements from and display on the control panel homepage", 0)
 	confReverseProxyClientIPHeader = config.RegisterOption("yagpdb.web.reverse_proxy_client_ip_header", "If were behind a reverse proxy, this is the header field with the real ip that the proxy passes along", "")
 
-	confAdPath    = config.RegisterOption("yagpdb.ad.img_path", "The ad image ", "")
-	confAdLinkurl = config.RegisterOption("yagpdb.ad.link", "Link to follow when clicking on the ad", "")
-	confAdWidth   = config.RegisterOption("yagpdb.ad.w", "Ad width", 0)
-	confAdHeight  = config.RegisterOption("yagpdb.ad.h", "Ad Height", 0)
-	ConfAdVideos  = config.RegisterOption("yagpdb.ad.video_paths", "Comma seperated list of video paths in different formats", "")
+	confAdPath       = config.RegisterOption("yagpdb.ad.img_path", "The ad image ", "")
+	confAdLinkurl    = config.RegisterOption("yagpdb.ad.link", "Link to follow when clicking on the ad", "")
+	confAdWidth      = config.RegisterOption("yagpdb.ad.w", "Ad width", 0)
+	confAdHeight     = config.RegisterOption("yagpdb.ad.h", "Ad Height", 0)
+	ConfAdVideos     = config.RegisterOption("yagpdb.ad.video_paths", "Comma seperated list of video paths in different formats", "")
+	confDemoServerID = config.RegisterOption("yagpdb.web.demo_server_id", "Server ID for live demo links", 0)
 
 	ConfAdsTxt = config.RegisterOption("yagpdb.ads.ads_txt", "Path to the ads.txt file for monetization using ad networks", "")
 
@@ -119,6 +119,8 @@ func BaseURL() string {
 }
 
 func Run() {
+	common.ServiceTracker.RegisterService(common.ServiceTypeFrontend, "Webserver", "", nil)
+
 	common.RegisterPlugin(&ControlPanelPlugin{})
 
 	loadTemplates()
@@ -139,7 +141,6 @@ func Run() {
 	mux := setupRoutes()
 
 	// Start monitoring the bot
-	go botrest.RunPinger()
 	go pollCommandsRan()
 
 	blogChannel := confAnnouncementsChannel.GetInt()
@@ -147,13 +148,13 @@ func Run() {
 		go discordblog.RunPoller(common.BotSession, int64(blogChannel), time.Minute)
 	}
 
-	LoadAd()
+	loadAd()
 
 	logger.Info("Running webservers")
 	runServers(mux)
 }
 
-func LoadAd() {
+func loadAd() {
 	path := confAdPath.GetString()
 	linkurl := confAdLinkurl.GetString()
 
@@ -287,7 +288,6 @@ func setupRoutes() *goji.Mux {
 
 	// Server control panel, requires you to be an admin for the server (owner or have server management role)
 	CPMux = goji.SubMux()
-	CPMux.Use(RequireSessionMiddleware)
 	CPMux.Use(ActiveServerMW)
 	CPMux.Use(RequireActiveServer)
 	CPMux.Use(LoadCoreConfigMiddleware)

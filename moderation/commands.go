@@ -122,7 +122,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		CmdCategory:   commands.CategoryModeration,
 		Name:          "Ban",
 		Aliases:       []string{"banid"},
-		Description:   "Bans a member, specify a duration with -d",
+		Description:   "Bans a member, specify a duration with -d and specify number of days of messages to delete with -ddays (0 to 7)",
 		RequiredArgs:  1,
 		Arguments: []*dcmd.ArgDef{
 			&dcmd.ArgDef{Name: "User", Type: dcmd.UserID},
@@ -130,6 +130,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		},
 		ArgSwitches: []*dcmd.ArgDef{
 			&dcmd.ArgDef{Switch: "d", Default: time.Duration(0), Name: "Duration", Type: &commands.DurationArg{}},
+			&dcmd.ArgDef{Switch: "ddays", Default: 1, Name: "Days", Type: dcmd.Int},
 		},
 		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
 			config, target, err := MBaseCmd(parsed, parsed.Args[0].Int64())
@@ -143,7 +144,7 @@ var ModerationCommands = []*commands.YAGCommand{
 				return nil, err
 			}
 
-			err = BanUserWithDuration(config, parsed.GS.ID, parsed.Msg.ChannelID, parsed.Msg.Author, reason, target, parsed.Switches["d"].Value.(time.Duration))
+			err = BanUserWithDuration(config, parsed.GS.ID, parsed.Msg.ChannelID, parsed.Msg.Author, reason, target, parsed.Switches["d"].Value.(time.Duration), parsed.Switches["ddays"].Int())
 			if err != nil {
 				return nil, err
 			}
@@ -311,7 +312,7 @@ var ModerationCommands = []*commands.YAGCommand{
 		CustomEnabled:   true,
 		CmdCategory:     commands.CategoryModeration,
 		Name:            "Clean",
-		Description:     "Delete the last number of messages from chat, optionally filtering by user, max age and regex.",
+		Description:     "Delete the last number of messages from chat, optionally filtering by user, max age and regex or ignoring pinned messages.",
 		LongDescription: "Specify a regex with \"-r regex_here\" and max age with \"-ma 1h10m\"\nNote: Will only look in the last 1k messages",
 		Aliases:         []string{"clear", "cl"},
 		RequiredArgs:    1,
@@ -323,6 +324,7 @@ var ModerationCommands = []*commands.YAGCommand{
 			&dcmd.ArgDef{Switch: "r", Name: "Regex", Type: dcmd.String},
 			&dcmd.ArgDef{Switch: "ma", Default: time.Duration(0), Name: "Max age", Type: &commands.DurationArg{}},
 			&dcmd.ArgDef{Switch: "i", Name: "Regex case insensitive"},
+			&dcmd.ArgDef{Switch: "nopin", Name: "Ignore pinned messages"},
 		},
 		ArgumentCombos: [][]int{[]int{0}, []int{0, 1}, []int{1, 0}},
 		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
@@ -376,6 +378,13 @@ var ModerationCommands = []*commands.YAGCommand{
 				filtered = true
 			}
 
+			// Check if we should ignore pinned messages
+			pe := false
+			if parsed.Switches["nopin"].Value != nil && parsed.Switches["nopin"].Value.(bool) {
+				pe = true
+				filtered = true
+			}
+
 			limitFetch := num
 			if userFilter != 0 || filtered {
 				limitFetch = num * 50 // Maybe just change to full fetch?
@@ -388,7 +397,7 @@ var ModerationCommands = []*commands.YAGCommand{
 			// Wait a second so the client dosen't gltich out
 			time.Sleep(time.Second)
 
-			numDeleted, err := AdvancedDeleteMessages(parsed.Msg.ChannelID, userFilter, re, ma, num, limitFetch)
+			numDeleted, err := AdvancedDeleteMessages(parsed.Msg.ChannelID, userFilter, re, ma, pe, num, limitFetch)
 
 			return dcmd.NewTemporaryResponse(time.Second*5, fmt.Sprintf("Deleted %d message(s)! :')", numDeleted), true), err
 		},
@@ -737,7 +746,7 @@ var ModerationCommands = []*commands.YAGCommand{
 	},
 }
 
-func AdvancedDeleteMessages(channelID int64, filterUser int64, regex string, maxAge time.Duration, deleteNum, fetchNum int) (int, error) {
+func AdvancedDeleteMessages(channelID int64, filterUser int64, regex string, maxAge time.Duration, pinFilterEnable bool, deleteNum, fetchNum int) (int, error) {
 	var compiledRegex *regexp.Regexp
 	if regex != "" {
 		// Start by compiling the regex
@@ -745,6 +754,19 @@ func AdvancedDeleteMessages(channelID int64, filterUser int64, regex string, max
 		compiledRegex, err = regexp.Compile(regex)
 		if err != nil {
 			return 0, err
+		}
+	}
+
+	var pinnedMessages map[int64]struct{}
+	if pinFilterEnable {
+		//Fetch pinned messages from channel and make a map with ids as keys which will make it easy to verify if a message with a given ID is pinned message
+		messageSlice, err := common.BotSession.ChannelMessagesPinned(channelID)
+		if err != nil {
+			return 0, err
+		}
+		pinnedMessages = make(map[int64]struct{}, len(messageSlice))
+		for _, msg := range messageSlice {
+			pinnedMessages[msg.ID] = struct{}{} //empty struct works because we are not really interested in value
 		}
 	}
 
@@ -775,6 +797,13 @@ func AdvancedDeleteMessages(channelID int64, filterUser int64, regex string, max
 		// Check max age
 		if maxAge != 0 && now.Sub(msgs[i].ParsedCreated) > maxAge {
 			continue
+		}
+
+		// Check if pinned message to ignore
+		if pinFilterEnable {
+			if _, found := pinnedMessages[msgs[i].ID]; found {
+				continue
+			}
 		}
 
 		toDelete = append(toDelete, msgs[i].ID)

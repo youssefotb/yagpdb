@@ -183,7 +183,6 @@ func IsAdminRequest(ctx context.Context, r *http.Request) bool {
 
 	if v := ctx.Value(common.ContextKeyCurrentGuild); v != nil {
 		// accessing a server page
-
 		g := v.(*discordgo.Guild)
 
 		gWithConnected := &common.GuildWithConnected{
@@ -258,7 +257,7 @@ func CtxLogger(ctx context.Context) *logrus.Entry {
 		return inter.(*logrus.Entry)
 	}
 
-	return logrus.NewEntry(logger)
+	return logger
 }
 
 func WriteErrorResponse(w http.ResponseWriter, r *http.Request, err string, statusCode int) {
