@@ -11,6 +11,7 @@ require (
 	github.com/PuerkitoBio/goquery v1.5.0
 	github.com/StackExchange/wmi v0.0.0-20190523213315-cbe66965904d // indirect
 	github.com/alfredxing/calc v0.0.0-20180827002445-77daf576f976
+	github.com/bwmarrin/discordgo v0.20.1
 	github.com/bwmarrin/snowflake v0.3.0
 	github.com/certifi/gocertifi v0.0.0-20190905060710-a5e0173ced67 // indirect
 	github.com/dghubble/go-twitter v0.0.0-20190719072343-39e5462e111f

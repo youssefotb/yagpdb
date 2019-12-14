@@ -1,4 +1,4 @@
-package common
+package roletemplates
 
 import (
 	"regexp"
@@ -46,7 +46,3 @@ var (
 		},
 	}
 )
-
-func GetGuildRoleTemplates() {
-
-}
