@@ -342,32 +342,41 @@ func tmplDBSetExpire(ctx *templates.Context) func(userID int64, key interface{},
 			return "", errors.New("Above DB Limit")
 		}
 
-		valueSerialized, err := serializeValue(value)
-		if err != nil {
-			return "", err
-		}
-
-		vNum := templates.ToFloat64(value)
-		keyStr := limitString(templates.ToString(key), 256)
-
-		var expires null.Time
-		if ttl > 0 {
-			expires.Time = time.Now().Add(time.Second * time.Duration(ttl))
-			expires.Valid = true
-		}
-
 		m := &models.TemplatesUserDatabase{
 			GuildID:   ctx.GS.ID,
 			UserID:    userID,
 			UpdatedAt: time.Now(),
-			ExpiresAt: expires,
 
-			Key:      keyStr,
-			ValueRaw: valueSerialized,
-			ValueNum: vNum,
+			Key: limitString(templates.ToString(key), 256),
+			// ValueNum: vNum,
+			ValueIsInt: false,
+			ValueRaw:   []byte{},
 		}
 
-		err = m.Upsert(context.Background(), common.PQ, true, []string{"guild_id", "user_id", "key"}, boil.Whitelist("value_raw", "value_num", "updated_at", "expires_at"), boil.Infer())
+		switch value.(type) {
+		case float32, float64:
+			m.ValueNum = templates.ToFloat64(value)
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+			m.ValueIsInt = true
+			m.ValueInt = templates.ToInt64(value)
+		default:
+			valueSerialized, err := serializeValue(value)
+			if err != nil {
+				return "", err
+			}
+			m.ValueRaw = valueSerialized
+		}
+
+		// vNum := templates.ToFloat64(value)
+
+		if ttl > 0 {
+			m.ExpiresAt = null.Time{
+				Valid: true,
+				Time:  time.Now().Add(time.Second * time.Duration(ttl)),
+			}
+		}
+
+		err := m.Upsert(context.Background(), common.PQ, true, []string{"guild_id", "user_id", "key"}, boil.Whitelist("value_raw", "value_num", "value_int", "value_is_int", "updated_at", "expires_at"), boil.Infer())
 		return "", err
 	}
 }
@@ -386,24 +395,42 @@ func tmplDBIncr(ctx *templates.Context) interface{} {
 			return "", errors.New("Above DB Limit")
 		}
 
-		vNum := templates.ToFloat64(incrBy)
-		valueSerialized, err := serializeValue(vNum)
+		keyStr := limitString(templates.ToString(key), 256)
+
+		m, err := models.TemplatesUserDatabases(qm.Where("guild_id = ? AND user_id = ? AND key = ? AND (expires_at IS NULL OR expires_at > now())", ctx.GS.ID, userID, keyStr)).OneG(context.Background())
 		if err != nil {
 			return "", err
 		}
 
-		keyStr := limitString(templates.ToString(key), 256)
+		valueSerialized, err := serializeValue(incrBy)
+		if err != nil {
+			return "", err
+		}
 
-		const q = `INSERT INTO templates_user_database (created_at, updated_at, guild_id, user_id, key, value_raw, value_num) 
-VALUES ($1, $1, $2, $3, $4, $5, $6)
+		const qInt = `INSERT INTO templates_user_database (created_at, updated_at, guild_id, user_id, key, value_raw, value_int) 
+VALUES (now(), now(), $1, $2, $3, $4, $5)
 ON CONFLICT (guild_id, user_id, key) 
-DO UPDATE SET value_num = templates_user_database.value_num + $6, updated_at = $1
+DO UPDATE SET  updated_at = now(),
+value_int = templates_user_database.value_int + $5
+RETURNING value_int`
+
+		const qFloat = `INSERT INTO templates_user_database (created_at, updated_at, guild_id, user_id, key, value_raw, value_num) 
+VALUES (now(), now(), $1, $2, $3, $4, $5)
+ON CONFLICT (guild_id, user_id, key) 
+DO UPDATE SET value_num = templates_user_database.value_num + $5, updated_at = now()
 RETURNING value_num`
 
-		result := common.PQ.QueryRow(q, time.Now(), ctx.GS.ID, userID, keyStr, valueSerialized, vNum)
+		var newVal interface{}
+		if m.ValueIsInt {
+			vInt := templates.ToInt64(incrBy)
+			result := common.PQ.QueryRow(qFloat, ctx.GS.ID, userID, keyStr, valueSerialized, vInt)
+			err = result.Scan(&newVal)
+		} else {
+			vNum := templates.ToFloat64(incrBy)
+			result := common.PQ.QueryRow(qFloat, ctx.GS.ID, userID, keyStr, valueSerialized, vNum)
+			err = result.Scan(&newVal)
+		}
 
-		var newVal float64
-		err = result.Scan(&newVal)
 		return newVal, err
 	}
 }
@@ -648,7 +675,11 @@ func ToLightDBEntry(m *models.TemplatesUserDatabase) (*LightDBEntry, error) {
 
 	decodedValue := dst
 	if common.IsNumber(dst) {
-		decodedValue = m.ValueNum
+		if m.ValueIsInt {
+			decodedValue = m.ValueInt
+		} else {
+			decodedValue = m.ValueNum
+		}
 	}
 
 	entry := &LightDBEntry{

@@ -61,21 +61,24 @@ ALTER TABLE custom_commands ADD COLUMN IF NOT EXISTS disabled BOOLEAN NOT NULL D
 `, `
 CREATE TABLE IF NOT EXISTS templates_user_database (
 	id BIGSERIAL PRIMARY KEY,
-
+	
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	expires_at TIMESTAMP WITH TIME ZONE,
-
+	
 	guild_id BIGINT NOT NULL,
 	user_id BIGINT NOT NULL,
-
+	
 	key TEXT NOT NULL,
-	value_num DOUBLE PRECISION NOT NULL,
+	value_num DOUBLE PRECISION NOT NULL, 
 	value_raw BYTEA NOT NULL,
-
+	
 	UNIQUE(guild_id, user_id, key)
-);
-
+	);
+`, `
+ALTER TABLE templates_user_database ADD COLUMN IF NOT EXISTS value_int BIGINT NOT NULL DEFAULT 0;
+`, `
+ALTER TABLE templates_user_database ADD COLUMN IF NOT EXISTS value_is_int BOOLEAN NOT NULL DEFAULT false;
 `, `
 CREATE INDEX IF NOT EXISTS templates_user_database_combined_idx ON templates_user_database (guild_id, user_id, key, value_num);
 `, `
