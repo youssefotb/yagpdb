@@ -4,6 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/jonas747/dcmd"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/yagpdb/bot"
@@ -16,11 +22,6 @@ import (
 	"github.com/volatiletech/null"
 	"github.com/volatiletech/sqlboiler/boil"
 	"github.com/volatiletech/sqlboiler/queries/qm"
-	"math/rand"
-	"regexp"
-	"strconv"
-	"strings"
-	"time"
 )
 
 var _ commands.CommandProvider = (*Plugin)(nil)
@@ -80,9 +81,6 @@ func (p *Plugin) AddCommands() {
 
 			duration := parsed.Args[0].Value.(time.Duration)
 			description := parsed.Args[1].Str()
-
-			description = common.EscapeSpecialMentions(description)
-			emoji = common.EscapeSpecialMentions(emoji)
 
 			m, err := common.BotSession.ChannelMessageSend(parsed.CS.ID, "Creating giveaway....")
 			if err != nil {
@@ -453,7 +451,7 @@ func CacheGetActiveGiveaways(ctx context.Context, guildID int64) ([]*models.Give
 		return nil, bot.ErrGuildNotFound
 	}
 
-	v, err := gs.UserCacheFetch(true, CacheKeyGiveaways, func() (interface{}, error) {
+	v, err := gs.UserCacheFetch(CacheKeyGiveaways, func() (interface{}, error) {
 		giveaways, err := models.Giveaways(
 			models.GiveawayWhere.GuildID.EQ(guildID),
 			models.GiveawayWhere.EndedAt.IsNull()).AllG(ctx)
