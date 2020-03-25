@@ -13,15 +13,12 @@ import (
 )
 
 func (p *Plugin) InitWeb() {
-	tmplPath := "templates/plugins/moderation.html"
-	if common.Testing {
-		tmplPath = "../../moderation/assets/moderation.html"
-	}
-	web.Templates = template.Must(web.Templates.ParseFiles(tmplPath))
+	web.LoadHTMLTemplate("../../moderation/assets/moderation.html", "templates/plugins/moderation.html")
 
 	web.AddSidebarItem(web.SidebarCategoryTools, &web.SidebarItem{
 		Name: "Moderation",
 		URL:  "moderation",
+		Icon: "fas fa-gavel",
 	})
 
 	subMux := goji.SubMux()
@@ -68,6 +65,7 @@ func HandlePostModeration(w http.ResponseWriter, r *http.Request) (web.TemplateD
 	templateData["VisibleURL"] = "/manage/" + discordgo.StrID(activeGuild.ID) + "/moderation/"
 
 	newConfig := ctx.Value(common.ContextKeyParsedForm).(*Config)
+	newConfig.DefaultMuteDuration.Valid = true
 	templateData["ModConfig"] = newConfig
 
 	err := newConfig.Save(activeGuild.ID)

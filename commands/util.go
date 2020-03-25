@@ -152,11 +152,12 @@ func (o *DurationOutOfRangeError) Error() string {
 	} else if o.Max == 0 {
 		return fmt.Sprintf("%s is %s, has to be bigger than %s", o.ArgName, preStr, common.HumanizeDuration(common.DurationPrecisionMinutes, o.Min))
 	} else {
-		format := "%s is %s (has to be within `%d` and `%d`)"
+		format := "%s is %s (has to be within `%s` and `%s`)"
 		return fmt.Sprintf(format, o.ArgName, preStr, common.HumanizeDuration(common.DurationPrecisionMinutes, o.Min), common.HumanizeDuration(common.DurationPrecisionMinutes, o.Max))
 	}
 }
 
+// PublicError is a error that is both logged and returned as a response
 type PublicError string
 
 func (p PublicError) Error() string {
@@ -169,6 +170,27 @@ func NewPublicError(a ...interface{}) PublicError {
 
 func NewPublicErrorF(f string, a ...interface{}) PublicError {
 	return PublicError(fmt.Sprintf(f, a...))
+}
+
+// UserError is a special error type that is only sent as a response, and not logged
+type UserError string
+
+var _ dcmd.UserError = (UserError)("") // make sure it implements this interface
+
+func (ue UserError) Error() string {
+	return string(ue)
+}
+
+func (ue UserError) IsUserError() bool {
+	return true
+}
+
+func NewUserError(a ...interface{}) error {
+	return UserError(fmt.Sprint(a...))
+}
+
+func NewUserErrorf(f string, a ...interface{}) error {
+	return UserError(fmt.Sprintf(f, a...))
 }
 
 func FilterBadInvites(msg string, guildID int64, replacement string) string {
@@ -201,7 +223,7 @@ func CommonContainerNotFoundHandler(container *dcmd.Container, fixedMessage stri
 
 			enabled := false
 
-			// make sure that atleast 1 command in the container is enabled
+			// make sure that at least 1 command in the container is enabled
 			for _, v := range container.Commands {
 				cast := v.Command.(*YAGCommand)
 				settings, err := cast.GetSettingsWithLoadedOverrides(chain, data.GS.ID, channelOverrides)
@@ -270,7 +292,7 @@ func (ma *MemberArg) Parse(def *dcmd.ArgDef, part string, data *dcmd.Data) (inte
 		return nil, dcmd.NewSimpleUserError("Invalid mention or id")
 	}
 
-	member, err := bot.GetMember(data.GS.ID, id)
+	member, err := bot.GetMemberJoinedAt(data.GS.ID, id)
 	if err != nil {
 		if common.IsDiscordErr(err, discordgo.ErrCodeUnknownMember, discordgo.ErrCodeUnknownUser) {
 			return nil, dcmd.NewSimpleUserError("User not a member of the server")

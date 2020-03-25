@@ -1,16 +1,18 @@
 package notifications
 
 import (
-	"emperror.dev/errors"
 	"fmt"
+	"math/rand"
+	"strings"
+
+	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dstate"
+	"github.com/jonas747/yagpdb/analytics"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/bot/eventsystem"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/templates"
-	"math/rand"
-	"strings"
 )
 
 var _ bot.BotInitHandler = (*Plugin)(nil)
@@ -59,6 +61,8 @@ func HandleGuildMemberAdd(evtData *eventsystem.EventData) (retry bool, err error
 				Type:  discordgo.ChannelTypeDM,
 			}
 
+			go analytics.RecordActiveUnit(gs.ID, &Plugin{}, "posted_join_server_msg")
+
 			if sendTemplate(thinCState, config.JoinDMMsg, ms, "join dm", false) {
 				return true, nil
 			}
@@ -70,6 +74,8 @@ func HandleGuildMemberAdd(evtData *eventsystem.EventData) (retry bool, err error
 		if channel == nil {
 			return
 		}
+
+		go analytics.RecordActiveUnit(gs.ID, &Plugin{}, "posted_join_server_dm")
 
 		chanMsg := config.JoinServerMsgs[rand.Intn(len(config.JoinServerMsgs))]
 		if sendTemplate(channel, chanMsg, ms, "join server msg", config.CensorInvites) {
@@ -106,6 +112,8 @@ func HandleGuildMemberRemove(evt *eventsystem.EventData) (retry bool, err error)
 
 	chanMsg := config.LeaveMsgs[rand.Intn(len(config.LeaveMsgs))]
 
+	go analytics.RecordActiveUnit(gs.ID, &Plugin{}, "posted_leave_server_msg")
+
 	if sendTemplate(channel, chanMsg, ms, "leave", config.CensorInvites) {
 		return true, nil
 	}
@@ -116,6 +124,7 @@ func HandleGuildMemberRemove(evt *eventsystem.EventData) (retry bool, err error)
 // sendTemplate parses and executes the provided template, returns wether an error occured that we can retry from (temporary network failures and the like)
 func sendTemplate(cs *dstate.ChannelState, tmpl string, ms *dstate.MemberState, name string, censorInvites bool) bool {
 	ctx := templates.NewContext(cs.Guild, cs, ms)
+	ctx.CurrentFrame.SendResponseInDM = cs.Type == discordgo.ChannelTypeDM
 
 	ctx.Data["RealUsername"] = ms.Username
 	if censorInvites {
@@ -140,18 +149,24 @@ func sendTemplate(cs *dstate.ChannelState, tmpl string, ms *dstate.MemberState, 
 
 	if cs.Type == discordgo.ChannelTypeDM {
 		_, err = common.BotSession.ChannelMessageSend(cs.ID, msg)
-	} else if !ctx.DelResponse {
-		bot.QueueMergedMessage(cs.ID, msg)
+	} else if !ctx.CurrentFrame.DelResponse {
+		send := ctx.MessageSend("")
+		bot.QueueMergedMessage(cs.ID, msg, send.AllowedMentions)
 	} else {
 		var m *discordgo.Message
-		m, err = common.BotSession.ChannelMessageSend(cs.ID, msg)
-		if err == nil && ctx.DelResponse {
-			templates.MaybeScheduledDeleteMessage(cs.Guild.ID, cs.ID, m.ID, ctx.DelResponseDelay)
+		m, err = common.BotSession.ChannelMessageSendComplex(cs.ID, ctx.MessageSend(msg))
+		if err == nil && ctx.CurrentFrame.DelResponse {
+			templates.MaybeScheduledDeleteMessage(cs.Guild.ID, cs.ID, m.ID, ctx.CurrentFrame.DelResponseDelay)
 		}
 	}
 
 	if err != nil {
-		logger.WithError(err).WithField("guild", cs.Guild.ID).Error("Failed sending " + name)
+		l := logger.WithError(err).WithField("guild", cs.Guild.ID)
+		if common.IsDiscordErr(err, discordgo.ErrCodeCannotSendMessagesToThisUser) {
+			l.Warn("Failed sending " + name)
+		} else {
+			l.Error("Failed sending " + name)
+		}
 	}
 
 	return bot.CheckDiscordErrRetry(err)
@@ -188,8 +203,10 @@ func HandleChannelUpdate(evt *eventsystem.EventData) (retry bool, err error) {
 		}
 	}
 
+	go analytics.RecordActiveUnit(cu.GuildID, &Plugin{}, "posted_topic_change")
+
 	go func() {
-		_, err := common.BotSession.ChannelMessageSend(topicChannel, common.EscapeSpecialMentions(fmt.Sprintf("Topic in channel <#%d> changed to **%s**", cu.ID, cu.Topic)))
+		_, err := common.BotSession.ChannelMessageSend(topicChannel, fmt.Sprintf("Topic in channel <#%d> changed to **%s**", cu.ID, cu.Topic))
 		if err != nil {
 			logger.WithError(err).WithField("guild", cu.GuildID).Warn("Failed sending topic change message")
 		}

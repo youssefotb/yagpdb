@@ -45,19 +45,14 @@ type ConfigFormData struct {
 }
 
 func (lp *Plugin) InitWeb() {
-	tmplPathSettings := "templates/plugins/logs_control_panel.html"
-	tmplPathView := "templates/plugins/logs_view.html"
-	if common.Testing {
-		tmplPathSettings = "../../logs/assets/logs_control_panel.html"
-		tmplPathView = "../../logs/assets/logs_view.html"
-	}
+	web.LoadHTMLTemplate("../../logs/assets/logs_control_panel.html", "templates/plugins/logs_control_panel.html")
+	web.LoadHTMLTemplate("../../logs/assets/logs_view.html", "templates/plugins/logs_view.html")
 
 	web.AddSidebarItem(web.SidebarCategoryTools, &web.SidebarItem{
 		Name: "Logging",
 		URL:  "logging/",
+		Icon: "fas fa-database",
 	})
-
-	web.Templates = template.Must(web.Templates.ParseFiles(tmplPathSettings, tmplPathView))
 
 	web.ServerPublicMux.Handle(pat.Get("/logs/:id"), web.RenderHandler(LogFetchMW(HandleLogsHTML, true), "public_server_logs"))
 	web.ServerPublicMux.Handle(pat.Get("/logs/:id/"), web.RenderHandler(LogFetchMW(HandleLogsHTML, true), "public_server_logs"))
@@ -195,7 +190,7 @@ func HandleLogsCPDelete(w http.ResponseWriter, r *http.Request) (web.TemplateDat
 func CheckCanAccessLogs(w http.ResponseWriter, r *http.Request, config *models.GuildLoggingConfig) bool {
 	_, tmpl := web.GetBaseCPContextData(r.Context())
 
-	isAdmin := web.IsAdminRequest(r.Context(), r)
+	isAdmin, _ := web.IsAdminRequest(r.Context(), r)
 
 	// check if were allowed access to logs on this server
 	if isAdmin || len(config.MessageLogsAllowedRoles) < 1 {
@@ -283,7 +278,7 @@ func HandleLogsHTML(w http.ResponseWriter, r *http.Request) interface{} {
 	config := r.Context().Value(ctxKeyConfig).(*models.GuildLoggingConfig)
 
 	// check if were allowed to view deleted messages
-	canViewDeleted := web.IsAdminRequest(r.Context(), r)
+	canViewDeleted, _ := web.IsAdminRequest(r.Context(), r)
 	if config.EveryoneCanViewDeleted.Bool {
 		canViewDeleted = true
 	} else if config.ManageMessagesCanViewDeleted.Bool && !canViewDeleted {
@@ -393,7 +388,7 @@ func (p *Plugin) LoadServerHomeWidget(w http.ResponseWriter, r *http.Request) (w
 
 	format := `<ul>
 	<li>Username logging: %s</li>
-	<li>Nickname loggin: %s</li>
+	<li>Nickname logging: %s</li>
 	<li>Blacklisted channels from creating message logs: <code>%d</code></li>
 </ul>`
 

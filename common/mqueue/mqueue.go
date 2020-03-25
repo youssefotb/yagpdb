@@ -3,26 +3,30 @@ package mqueue
 import (
 	"container/list"
 	"encoding/json"
-	"github.com/jonas747/yagpdb/common/config"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jonas747/yagpdb/bot/eventsystem"
+	"github.com/jonas747/yagpdb/common/config"
 
 	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/common"
-	"github.com/mediocregopher/radix"
+	"github.com/mediocregopher/radix/v3"
 	"github.com/sirupsen/logrus"
 )
 
 var (
-	sources  = make(map[string]PluginWithErrorHandler)
-	stopChan = make(chan *sync.WaitGroup)
+	sources    = make(map[string]PluginWithSourceDisabler)
+	stopChan   = make(chan *sync.WaitGroup)
+	resetFirst = make(chan bool)
 
 	currentlyProcessing     = make([]int64, 0)
 	currentlyProcessingLock sync.RWMutex
@@ -39,10 +43,12 @@ var (
 	confMaxWorkers = config.RegisterOption("yagpdb.mqueue.max_workers", "Max mqueue sending workers", 2)
 )
 
-type PluginWithErrorHandler interface {
+// PluginWithSourceDisabler todo
+type PluginWithSourceDisabler interface {
 	DisableFeed(elem *QueuedElement, err error)
 }
 
+// PluginWithWebhookAvatar can be implemented by plugins for custom avatars
 type PluginWithWebhookAvatar interface {
 	WebhookAvatar() string
 }
@@ -52,9 +58,11 @@ var (
 	_ bot.BotStopperHandler  = (*Plugin)(nil)
 )
 
+// Plugin represents the mqueue plugin
 type Plugin struct {
 }
 
+// PluginInfo implements common.Plugin
 func (p *Plugin) PluginInfo() *common.PluginInfo {
 	return &common.PluginInfo{
 		Name:     "mqueue",
@@ -63,6 +71,7 @@ func (p *Plugin) PluginInfo() *common.PluginInfo {
 	}
 }
 
+// RegisterPlugin registers the mqueue plugin into the plugin system and also initializes it
 func RegisterPlugin() {
 
 	var err error
@@ -96,11 +105,12 @@ func RegisterPlugin() {
 	common.RegisterPlugin(p)
 }
 
-func RegisterSource(name string, source PluginWithErrorHandler) {
+// RegisterSource registers a mqueue source, used for error handling
+func RegisterSource(name string, source PluginWithSourceDisabler) {
 	sources[name] = source
 }
 
-func IncrIDCounter() (next int64) {
+func incrIDCounter() (next int64) {
 	err := common.RedisPool.Do(retryableredis.Cmd(&next, "INCR", "mqueue_id_counter"))
 	if err != nil {
 		logger.WithError(err).Error("Failed increasing mqueue id counter")
@@ -110,35 +120,14 @@ func IncrIDCounter() (next int64) {
 	return next
 }
 
-func QueueMessageString(source, sourceID string, guildID, channel int64, message string) {
-	QueueMessage(source, sourceID, guildID, channel, message, nil)
-}
-
-func QueueMessageEmbed(source, sourceID string, guildID, channel int64, embed *discordgo.MessageEmbed) {
-	QueueMessage(source, sourceID, guildID, channel, "", embed)
-}
-
-func QueueMessage(source, sourceID string, guildID, channel int64, msgStr string, embed *discordgo.MessageEmbed) {
-	QueueMessageWebhook(source, sourceID, guildID, channel, msgStr, embed, false, "")
-}
-
-func QueueMessageWebhook(source, sourceID string, guildID, channel int64, msgStr string, embed *discordgo.MessageEmbed, webhook bool, webhookUsername string) {
-	nextID := IncrIDCounter()
+// QueueMessage queues a message in the message queue
+func QueueMessage(elem *QueuedElement) {
+	nextID := incrIDCounter()
 	if nextID == -1 {
 		return
 	}
 
-	elem := &QueuedElement{
-		ID:              nextID,
-		Source:          source,
-		SourceID:        sourceID,
-		Channel:         channel,
-		MessageStr:      msgStr,
-		MessageEmbed:    embed,
-		Guild:           guildID,
-		UseWebhook:      webhook,
-		WebhookUsername: webhookUsername,
-	}
+	elem.ID = nextID
 
 	serialized, err := json.Marshal(elem)
 	if err != nil {
@@ -152,12 +141,25 @@ func QueueMessageWebhook(source, sourceID string, guildID, channel int64, msgStr
 	}
 }
 
+var _ bot.BotInitHandler = (*Plugin)(nil)
+
+func (p *Plugin) BotInit() {
+	eventsystem.AddHandlerAsyncLastLegacy(p, func(evt *eventsystem.EventData) {
+		resetFirst <- true
+		logger.Infof("Reset first")
+	}, eventsystem.EventYagShardReady)
+}
+
+var _ bot.LateBotInitHandler = (*Plugin)(nil)
+
+// LateBotInit implements bot.LateBotInitHandler
 func (p *Plugin) LateBotInit() {
 	go startPolling()
 	go processWorker()
 	go workerScaler()
 }
 
+// StopBot implements bot.BotStopperHandler
 func (p *Plugin) StopBot(wg *sync.WaitGroup) {
 	startedLock.Lock()
 	if !started {
@@ -244,6 +246,8 @@ func startPolling() {
 		case wg := <-stopChan:
 			shutdown(wg)
 			return
+		case <-resetFirst:
+			first = true
 		case <-ticker.C:
 			pollRedis(first)
 			first = false
@@ -295,6 +299,7 @@ func pollRedis(first bool) {
 		workmu.Lock()
 		defer workmu.Unlock()
 
+	OUTER:
 		for _, elem := range results {
 
 			var parsed *QueuedElement
@@ -304,32 +309,43 @@ func pollRedis(first bool) {
 				continue
 			}
 
-			if !bot.IsGuildOnCurrentProcess(parsed.Guild) {
+			if !bot.ReadyTracker.IsGuildShardReady(parsed.Guild) {
 				continue
+			}
+
+			for _, v := range workSlice {
+				// already in the queue
+				if v.elem.ID == parsed.ID {
+					continue OUTER
+				}
 			}
 
 			// Mark it as being processed so it wont get caught in further polling, unless its a new process in which case it wasnt completed
 			rc.Do(retryableredis.FlatCmd(nil, "ZADD", "mqueue", common.CurrentRunCounter, string(elem)))
 
-			workSlice = append(workSlice, &WorkItem{
+			workSlice = append(workSlice, &workItem{
 				elem: parsed,
 				raw:  elem,
 			})
 
 		}
 
+		sort.Slice(workSlice, func(i, j int) bool {
+			return workSlice[i].elem.Priority > workSlice[j].elem.Priority
+		})
+
 		return nil
 	}))
 }
 
-type WorkItem struct {
+type workItem struct {
 	elem *QueuedElement
 	raw  []byte
 }
 
 var (
-	workSlice  []*WorkItem
-	activeWork []*WorkItem
+	workSlice  []*workItem
+	activeWork []*workItem
 	workmu     sync.Mutex
 )
 
@@ -354,11 +370,21 @@ OUTER:
 			}
 		}
 
-		b := common.BotSession.Ratelimiter.GetBucket(discordgo.EndpointChannelMessages(v.elem.Channel))
-		b.Lock()
-		waitTime := common.BotSession.Ratelimiter.GetWaitTime(b, 1)
-		b.Unlock()
-		if waitTime > time.Millisecond*250 {
+		// check the ratelimit for this channel, we skip elements being ratelimited
+		var ratelimitWait time.Duration
+		if v.elem.UseWebhook {
+			b := webhookSession.Ratelimiter.GetBucket(discordgo.EndpointWebhook(v.elem.Channel))
+			b.Lock()
+			ratelimitWait = webhookSession.Ratelimiter.GetWaitTime(b, 1)
+			b.Unlock()
+		} else {
+			b := common.BotSession.Ratelimiter.GetBucket(discordgo.EndpointChannelMessages(v.elem.Channel))
+			b.Lock()
+			ratelimitWait = common.BotSession.Ratelimiter.GetWaitTime(b, 1)
+			b.Unlock()
+		}
+
+		if ratelimitWait > time.Millisecond*250 {
 			continue
 		}
 
@@ -372,7 +398,7 @@ func processWorker() {
 	atomic.AddInt32(numWorkers, 1)
 	defer atomic.AddInt32(numWorkers, -1)
 
-	var currentItem *WorkItem
+	var currentItem *workItem
 	for {
 		workmu.Lock()
 
@@ -476,7 +502,7 @@ var disableOnError = []int{
 	30007, // max number of webhooks
 }
 
-func maybeDisableFeed(source PluginWithErrorHandler, elem *QueuedElement, err *discordgo.RESTError) {
+func maybeDisableFeed(source PluginWithSourceDisabler, elem *QueuedElement, err *discordgo.RESTError) {
 	// source.HandleMQueueError(elem, errors.Cause(err))
 	if err.Message == nil || !common.ContainsIntSlice(disableOnError, err.Message.Code) {
 		// don't disable
@@ -496,7 +522,10 @@ func maybeDisableFeed(source PluginWithErrorHandler, elem *QueuedElement, err *d
 
 func trySendNormal(l *logrus.Entry, elem *QueuedElement) (err error) {
 	if elem.MessageStr != "" {
-		_, err = common.BotSession.ChannelMessageSend(elem.Channel, elem.MessageStr)
+		_, err = common.BotSession.ChannelMessageSendComplex(elem.Channel, &discordgo.MessageSend{
+			Content:         elem.MessageStr,
+			AllowedMentions: elem.AllowedMentions,
+		})
 	} else if elem.MessageEmbed != nil {
 		_, err = common.BotSession.ChannelMessageSendEmbed(elem.Channel, elem.MessageEmbed)
 	} else {
@@ -506,9 +535,9 @@ func trySendNormal(l *logrus.Entry, elem *QueuedElement) (err error) {
 	return
 }
 
-type CacheKeyWebhook int64
+type cacheKeyWebhook int64
 
-var ErrGuildNotFound = errors.New("Guild not found")
+var errGuildNotFound = errors.New("Guild not found")
 
 func trySendWebhook(l *logrus.Entry, elem *QueuedElement) (err error) {
 	if elem.MessageStr == "" && elem.MessageEmbed == nil {
@@ -526,18 +555,30 @@ func trySendWebhook(l *logrus.Entry, elem *QueuedElement) (err error) {
 
 	gs := bot.State.Guild(true, elem.Guild)
 	if gs == nil {
-		return ErrGuildNotFound
+		// another check just in case
+		if onGuild, err := common.BotIsOnGuild(elem.Guild); err == nil && !onGuild {
+			return errGuildNotFound
+		} else if err != nil {
+			return err
+		}
 	}
 
-	wh, err := gs.UserCacheFetch(true, CacheKeyWebhook(elem.Channel), func() (interface{}, error) {
-		return FindCreateWebhook(elem.Guild, elem.Channel, elem.Source, avatar)
-		// return weho
-	})
+	var whI interface{}
+	// in some cases guild state may not be available (starting up and the like)
+	if gs != nil {
+		whI, err = gs.UserCacheFetch(cacheKeyWebhook(elem.Channel), func() (interface{}, error) {
+			return findCreateWebhook(elem.Guild, elem.Channel, elem.Source, avatar)
+		})
+	} else {
+		// fallback if no gs is available
+		whI, err = findCreateWebhook(elem.Guild, elem.Channel, elem.Source, avatar)
+		logger.WithField("guild", elem.Guild).Warn("Guild state not available, ignoring cache")
+	}
 
 	if err != nil {
 		return err
 	}
-	webhook := wh.(*Webhook)
+	wh := whI.(*webhook)
 
 	webhookParams := &discordgo.WebhookParams{
 		Username: elem.WebhookUsername,
@@ -548,16 +589,18 @@ func trySendWebhook(l *logrus.Entry, elem *QueuedElement) (err error) {
 		webhookParams.Embeds = []*discordgo.MessageEmbed{elem.MessageEmbed}
 	}
 
-	err = webhookSession.WebhookExecute(webhook.ID, webhook.Token, true, webhookParams)
+	err = webhookSession.WebhookExecute(wh.ID, wh.Token, true, webhookParams)
 	if code, _ := common.DiscordError(err); code == discordgo.ErrCodeUnknownWebhook {
 		// if the webhook was deleted, then delete the bad boi from the databse and retry
 		const query = `DELETE FROM mqueue_webhooks WHERE id=$1`
-		_, err := common.PQ.Exec(query, webhook.ID)
+		_, err := common.PQ.Exec(query, wh.ID)
 		if err != nil {
 			return errors.WrapIf(err, "sql.delete")
 		}
 
-		gs.UserCacheDel(true, CacheKeyWebhook(elem.Channel))
+		if gs != nil {
+			gs.UserCacheDel(cacheKeyWebhook(elem.Channel))
+		}
 
 		return errors.New("deleted webhook")
 	}

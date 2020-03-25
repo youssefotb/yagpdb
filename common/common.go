@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DataDog/datadog-go/statsd"
@@ -23,15 +25,8 @@ import (
 	"github.com/volatiletech/sqlboiler/boil"
 )
 
-const (
-	VERSIONMAJOR = 1
-	VERSIONMINOR = 20
-	VERSIONPATCH = 4
-)
-
 var (
-	VERSIONNUMBER = fmt.Sprintf("%d.%d.%d", VERSIONMAJOR, VERSIONMINOR, VERSIONPATCH)
-	VERSION       = VERSIONNUMBER
+	VERSION = "unknown"
 
 	GORM *gorm.DB
 	PQ   *sql.DB
@@ -41,7 +36,7 @@ var (
 	BotSession *discordgo.Session
 	BotUser    *discordgo.User
 
-	RedisPoolSize = 10
+	RedisPoolSize = 0
 
 	Statsd *statsd.Client
 
@@ -57,8 +52,9 @@ var (
 	logger = GetFixedPrefixLogger("common")
 )
 
-// Initalizes all database connections, config loading and so on
-func Init() error {
+// CoreInit initializes the essential parts
+func CoreInit() error {
+
 	rand.Seed(time.Now().UnixNano())
 
 	stdlog.SetOutput(&STDLogProxy{})
@@ -68,29 +64,35 @@ func Init() error {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
 
-	err := LoadConfig()
+	err := connectRedis()
 	if err != nil {
 		return err
 	}
 
-	err = setupGlobalDGoSession()
+	err = LoadConfig()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Init initializes the rest of the bot
+func Init() error {
+
+	err := setupGlobalDGoSession()
 	if err != nil {
 		return err
 	}
 
 	ConnectDatadog()
 
-	err = connectRedis(ConfRedis.GetString())
-	if err != nil {
-		return err
-	}
-
 	db := "yagpdb"
 	if ConfPQDB.GetString() != "" {
 		db = ConfPQDB.GetString()
 	}
 
-	err = connectDB(ConfPQHost.GetString(), ConfPQUsername.GetString(), ConfPQPassword.GetString(), db)
+	err = connectDB(ConfPQHost.GetString(), ConfPQUsername.GetString(), ConfPQPassword.GetString(), db, confMaxSQLConns.GetInt())
 	if err != nil {
 		panic(err)
 	}
@@ -190,14 +192,31 @@ func InitTest() {
 		return
 	}
 
-	err := connectDB("localhost", "postgres", "123", testDB)
+	err := connectDB("localhost", "postgres", "123", testDB, 3)
 	if err != nil {
 		panic(err)
 	}
 }
 
-func connectRedis(addr string) (err error) {
-	RedisPool, err = basicredispool.NewPool(RedisPoolSize, &retryableredis.DialConfig{
+func connectRedis() (err error) {
+	maxConns := RedisPoolSize
+	if maxConns == 0 {
+		maxConns, _ = strconv.Atoi(os.Getenv("YAGPDB_REDIS_POOL_SIZE"))
+		if maxConns == 0 {
+			maxConns = 10
+		}
+	}
+
+	logger.Infof("Set redis pool size to %d", maxConns)
+
+	// we kinda bypass the config system because the config system also relies on redis
+	// this way the only required env var is the redis address, and per-host specific things
+	addr := os.Getenv("YAGPDB_REDIS")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+
+	RedisPool, err = basicredispool.NewPool(maxConns, &retryableredis.DialConfig{
 		Network: "tcp",
 		Addr:    addr,
 		OnReconnect: func(err error) {
@@ -221,19 +240,54 @@ func connectRedis(addr string) (err error) {
 	return
 }
 
-func connectDB(host, user, pass, dbName string) error {
+func connectDB(host, user, pass, dbName string, maxConns int) error {
 	if host == "" {
 		host = "localhost"
 	}
 
-	db, err := gorm.Open("postgres", fmt.Sprintf("host=%s user=%s dbname=%s sslmode=disable password='%s'", host, user, dbName, pass))
+	passwordPart := ""
+	if pass != "" {
+		passwordPart = " password='" + pass + "'"
+	}
+
+	db, err := gorm.Open("postgres", fmt.Sprintf("host=%s user=%s dbname=%s sslmode=disable%s", host, user, dbName, passwordPart))
 	GORM = db
 	PQ = db.DB()
 	boil.SetDB(PQ)
 	if err == nil {
-		PQ.SetMaxOpenConns(3)
+		PQ.SetMaxOpenConns(maxConns)
+		PQ.SetMaxIdleConns(maxConns)
+		logger.Infof("Set max PG connections to %d", maxConns)
 	}
 	GORM.SetLogger(&GORMLogger{})
 
 	return err
+}
+
+var (
+	shutdownFunc   func()
+	shutdownCalled bool
+	shutdownMU     sync.Mutex
+)
+
+func Shutdown() {
+	shutdownMU.Lock()
+	f := shutdownFunc
+	if f == nil || shutdownCalled {
+		shutdownMU.Unlock()
+		return
+	}
+
+	shutdownCalled = true
+	shutdownMU.Unlock()
+
+	if f != nil {
+		f()
+	}
+}
+
+func SetShutdownFunc(f func()) {
+	shutdownMU.Lock()
+	shutdownFunc = f
+	shutdownMU.Unlock()
 }

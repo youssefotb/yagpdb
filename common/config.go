@@ -1,10 +1,11 @@
 package common
 
 import (
-	"emperror.dev/errors"
-	"github.com/jonas747/yagpdb/common/config"
 	"strconv"
 	"strings"
+
+	"emperror.dev/errors"
+	"github.com/jonas747/yagpdb/common/config"
 )
 
 var (
@@ -29,6 +30,8 @@ var (
 	ConfDogStatsdAddress = config.RegisterOption("yagpdb.dogstatsdaddress", "dogstatsd address", "")
 	confNoSchemaInit     = config.RegisterOption("yagpdb.no_schema_init", "Disable schema intiialization", false)
 
+	confMaxSQLConns = config.RegisterOption("yagdb.pq_max_conns", "Max connections to postgres", 3)
+
 	BotOwners []int64
 )
 
@@ -42,6 +45,7 @@ func LoadConfig() (err error) {
 	configLoaded = true
 
 	config.AddSource(&config.EnvSource{})
+	config.AddSource(&config.RedisConfigStore{Pool: RedisPool})
 	config.Load()
 
 	requiredConf := []*config.ConfigOption{

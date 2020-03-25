@@ -8,6 +8,7 @@ import (
 
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dstate"
+	"github.com/jonas747/yagpdb/analytics"
 	"github.com/jonas747/yagpdb/automod/models"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/bot/eventsystem"
@@ -41,7 +42,7 @@ func (p *Plugin) handleMsgUpdate(evt *eventsystem.EventData) {
 
 // called on new messages and edits
 func (p *Plugin) checkMessage(msg *discordgo.Message) bool {
-	if msg.Author == nil || msg.Author.ID == common.BotUser.ID || msg.WebhookID != 0 || msg.Author.Discriminator == "0000" {
+	if !bot.IsNormalUserMessage(msg) {
 		// message edits can have a nil author, those are embed edits
 		// check against a discrim of 0000 to avoid some cases on webhook messages where webhook_id is 0, even tough its a webhook
 		// discrim is in those 0000 which is a invalid user discrim. (atleast when i was testing)
@@ -53,11 +54,7 @@ func (p *Plugin) checkMessage(msg *discordgo.Message) bool {
 		return true
 	}
 
-	ms, err := bot.GetMember(msg.GuildID, msg.Author.ID)
-	if err != nil {
-		logger.WithError(err).Debug("automod failed fetching member")
-		return true
-	}
+	ms := dstate.MSFromDGoMember(cs.Guild, msg.Member)
 
 	stripped := ""
 	return !p.CheckTriggers(nil, ms, msg, cs, func(trig *ParsedPart) (activated bool, err error) {
@@ -196,11 +193,8 @@ func (p *Plugin) checkViolationTriggers(ctxData *TriggeredRuleData, violationNam
 
 func (p *Plugin) handleGuildMemberUpdate(evt *eventsystem.EventData) {
 	evtData := evt.GuildMemberUpdate()
-	ms, err := bot.GetMember(evtData.GuildID, evtData.User.ID)
-	if err != nil || ms == nil {
-		return
-	}
 
+	ms := dstate.MSFromDGoMember(evt.GS, evtData.Member)
 	if ms.Nick == "" {
 		return
 	}
@@ -394,6 +388,8 @@ func (p *Plugin) RulesetRulesTriggeredCondsPassed(ruleset *ParsedRuleset, trigge
 
 	loggedModels := make([]*models.AutomodTriggeredRule, len(triggeredRules))
 
+	go analytics.RecordActiveUnit(ruleset.RSModel.GuildID, p, "rule_triggered")
+
 	// apply the effects
 	for i, rule := range triggeredRules {
 		ctxData.CurrentRule = rule
@@ -480,7 +476,7 @@ const (
 )
 
 func (p *Plugin) FetchGuildRulesets(gs *dstate.GuildState) ([]*ParsedRuleset, error) {
-	v, err := gs.UserCacheFetch(true, CacheKeyRulesets, func() (interface{}, error) {
+	v, err := gs.UserCacheFetch(CacheKeyRulesets, func() (interface{}, error) {
 		rulesets, err := models.AutomodRulesets(qm.Where("guild_id=?", gs.ID),
 			qm.Load("RulesetAutomodRules.RuleAutomodRuleData"), qm.Load("RulesetAutomodRulesetConditions")).AllG(context.Background())
 
@@ -509,7 +505,7 @@ func (p *Plugin) FetchGuildRulesets(gs *dstate.GuildState) ([]*ParsedRuleset, er
 }
 
 func FetchGuildLists(gs *dstate.GuildState) ([]*models.AutomodList, error) {
-	v, err := gs.UserCacheFetch(true, CacheKeyLists, func() (interface{}, error) {
+	v, err := gs.UserCacheFetch(CacheKeyLists, func() (interface{}, error) {
 		lists, err := models.AutomodLists(qm.Where("guild_id = ?", gs.ID)).AllG(context.Background())
 		if err != nil {
 			return nil, err

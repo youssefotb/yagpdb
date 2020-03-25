@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 
 	"emperror.dev/errors"
@@ -64,7 +63,10 @@ func DelayedMessageDelete(session *discordgo.Session, delay time.Duration, cID, 
 
 // SendTempMessage sends a message that gets deleted after duration
 func SendTempMessage(session *discordgo.Session, duration time.Duration, cID int64, msg string) {
-	m, err := BotSession.ChannelMessageSend(cID, EscapeSpecialMentions(msg))
+	m, err := BotSession.ChannelMessageSendComplex(cID, &discordgo.MessageSend{
+		Content:         msg,
+		AllowedMentions: AllowedMentionsParseUsers,
+	})
 	if err != nil {
 		return
 	}
@@ -102,6 +104,10 @@ func GetGuild(guildID int64) (guild *discordgo.Guild, err error) {
 
 func RandomAdjective() string {
 	return Adjectives[rand.Intn(len(Adjectives))]
+}
+
+func RandomNoun() string {
+	return Nouns[rand.Intn(len(Nouns))]
 }
 
 type DurationFormatPrecision int
@@ -205,19 +211,6 @@ func HumanizeTime(precision DurationFormatPrecision, in time.Time) string {
 		duration := in.Sub(now)
 		return "in " + HumanizeDuration(precision, duration)
 	}
-}
-
-func SendEmbedWithFallback(s *discordgo.Session, channelID int64, embed *discordgo.MessageEmbed) (*discordgo.Message, error) {
-	perms, err := s.State.UserChannelPermissions(s.State.User.ID, channelID)
-	if err != nil {
-		return nil, err
-	}
-
-	if perms&discordgo.PermissionEmbedLinks != 0 {
-		return s.ChannelMessageSendEmbed(channelID, embed)
-	}
-
-	return s.ChannelMessageSend(channelID, EscapeSpecialMentions(FallbackEmbed(embed)))
 }
 
 func FallbackEmbed(embed *discordgo.MessageEmbed) string {
@@ -354,89 +347,6 @@ func ErrWithCaller(err error) error {
 
 	f := runtime.FuncForPC(pc)
 	return errors.WithMessage(err, filepath.Base(f.Name()))
-}
-
-const zeroWidthSpace = "​"
-
-var (
-	everyoneReplacer    = strings.NewReplacer("@everyone", "@"+zeroWidthSpace+"everyone")
-	hereReplacer        = strings.NewReplacer("@here", "@"+zeroWidthSpace+"here")
-	patternRoleMentions = regexp.MustCompile("<@&[0-9]*>")
-)
-
-// EscapeSpecialMentions Escapes an everyone mention, adding a zero width space between the '@' and rest
-func EscapeSpecialMentions(in string) string {
-	return EscapeSpecialMentionsConditional(in, false, false, nil)
-}
-
-// EscapeSpecialMentionsConditional Escapes an everyone mention, adding a zero width space between the '@' and rest
-func EscapeEveryoneHere(s string, escapeEveryone, escapeHere bool) string {
-	if escapeEveryone {
-		s = everyoneReplacer.Replace(s)
-	}
-
-	if escapeHere {
-		s = hereReplacer.Replace(s)
-	}
-
-	return s
-}
-
-// EscapeSpecialMentionsConditional Escapes an everyone mention, adding a zero width space between the '@' and rest
-func EscapeSpecialMentionsConditional(s string, allowEveryone, allowHere bool, allowRoles []int64) string {
-	if !allowEveryone {
-		s = everyoneReplacer.Replace(s)
-	}
-
-	if !allowHere {
-		s = hereReplacer.Replace(s)
-	}
-
-	s = patternRoleMentions.ReplaceAllStringFunc(s, func(x string) string {
-		if len(x) < 4 {
-			return x
-		}
-
-		id := x[3 : len(x)-1]
-		parsed, _ := strconv.ParseInt(id, 10, 64)
-		if ContainsInt64Slice(allowRoles, parsed) {
-			// This role is allowed to be mentioned
-			return x
-		}
-
-		// Not allowed
-		return x[:2] + zeroWidthSpace + x[2:]
-	})
-
-	return s
-}
-
-func RetrySendMessage(channel int64, msg interface{}, maxTries int) error {
-	var err error
-	for currentTries := 0; currentTries < maxTries; currentTries++ {
-
-		switch t := msg.(type) {
-		case *discordgo.MessageEmbed:
-			_, err = BotSession.ChannelMessageSendEmbed(channel, t)
-		case string:
-			_, err = BotSession.ChannelMessageSend(channel, t)
-		default:
-			panic("Unknown message passed to RetrySendMessage")
-		}
-
-		if err == nil {
-			return nil
-		}
-
-		if e, ok := err.(*discordgo.RESTError); ok && e.Message != nil {
-			// Discord returned an actual error for us
-			return err
-		}
-
-		time.Sleep(time.Second * 5)
-	}
-
-	return err
 }
 
 // DiscordError extracts the errorcode discord sent us
@@ -663,4 +573,8 @@ func IsOwner(userID int64) bool {
 	}
 
 	return false
+}
+
+var AllowedMentionsParseUsers = discordgo.AllowedMentions{
+	Parse: []discordgo.AllowedMentionType{discordgo.AllowedMentionTypeUsers},
 }

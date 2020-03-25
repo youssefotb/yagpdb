@@ -1,9 +1,11 @@
 package serverstats
 
 import (
+	"context"
 	"fmt"
 	"html/template"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +24,7 @@ import (
 )
 
 var WebStatsCache = rcache.New(cacheChartFetcher, time.Minute)
+var WebConfigCache = rcache.NewInt(cacheConfigFetcher, time.Minute)
 
 type FormData struct {
 	Public         bool
@@ -29,11 +32,7 @@ type FormData struct {
 }
 
 func (p *Plugin) InitWeb() {
-	tmplPath := "templates/plugins/serverstats.html"
-	if common.Testing {
-		tmplPath = "../../serverstats/assets/serverstats.html"
-	}
-	web.Templates = template.Must(web.Templates.ParseFiles(tmplPath))
+	web.LoadHTMLTemplate("../../serverstats/assets/serverstats.html", "templates/plugins/serverstats.html")
 
 	statsCPMux := goji.SubMux()
 	web.CPMux.Handle(pat.New("/stats"), statsCPMux)
@@ -127,6 +126,8 @@ OUTER:
 		go pubsub.Publish("server_stats_invalidate_cache", ag.ID, nil)
 	}
 
+	WebConfigCache.Delete(int(ag.ID))
+
 	return templateData, err
 }
 
@@ -143,9 +144,8 @@ func publicHandlerJson(inner publicHandlerFuncJson, public bool) web.CustomHandl
 func HandleStatsJson(w http.ResponseWriter, r *http.Request, isPublicAccess bool) interface{} {
 	activeGuild, _ := web.GetBaseCPContextData(r.Context())
 
-	conf, err := GetConfig(r.Context(), activeGuild.ID)
-	if err != nil {
-		web.CtxLogger(r.Context()).WithError(err).Error("Failed retrieving stats config")
+	conf := GetConfigWeb(activeGuild.ID)
+	if conf == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return nil
 	}
@@ -154,7 +154,7 @@ func HandleStatsJson(w http.ResponseWriter, r *http.Request, isPublicAccess bool
 		return nil
 	}
 
-	stats, err := RetrieveDailyStats(activeGuild.ID)
+	stats, err := RetrieveDailyStats(time.Now(), activeGuild.ID)
 	if err != nil {
 		web.CtxLogger(r.Context()).WithError(err).Error("Failed retrieving stats")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -175,17 +175,15 @@ func HandleStatsJson(w http.ResponseWriter, r *http.Request, isPublicAccess bool
 }
 
 type ChartResponse struct {
-	Days        int                       `json:"days"`
-	MemberData  []*MemberChartDataPeriod  `json:"member_chart_data"`
-	MessageData []*MessageChartDataPeriod `json:"message_chart_data"`
+	Days int                `json:"days"`
+	Data []*ChartDataPeriod `json:"data"`
 }
 
 func HandleStatsCharts(w http.ResponseWriter, r *http.Request, isPublicAccess bool) interface{} {
 	activeGuild, _ := web.GetBaseCPContextData(r.Context())
 
-	conf, err := GetConfig(r.Context(), activeGuild.ID)
-	if err != nil {
-		web.CtxLogger(r.Context()).WithError(err).Error("Failed retrieving stats config")
+	conf := GetConfigWeb(activeGuild.ID)
+	if conf == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return nil
 	}
@@ -206,11 +204,22 @@ func HandleStatsCharts(w http.ResponseWriter, r *http.Request, isPublicAccess bo
 		numDays = 7
 	}
 
-	stats := CacheGetCharts(activeGuild.ID, numDays)
+	stats := CacheGetCharts(activeGuild.ID, numDays, r.Context())
 	return stats
 }
 
-func CacheGetCharts(guildID int64, days int) *ChartResponse {
+func emptyChartData() *ChartResponse {
+	return &ChartResponse{
+		Days: 0,
+		Data: []*ChartDataPeriod{},
+	}
+}
+
+func CacheGetCharts(guildID int64, days int, ctx context.Context) *ChartResponse {
+	if os.Getenv("YAGPDB_SERVERSTATS_DISABLE_SERVERSTATS") != "" {
+		return emptyChartData()
+	}
+
 	fetchDays := days
 	if days < 7 {
 		fetchDays = 7
@@ -228,18 +237,13 @@ func CacheGetCharts(guildID int64, days int) *ChartResponse {
 	key := "charts:" + strconv.FormatInt(guildID, 10) + ":" + strconv.FormatInt(int64(fetchDays), 10)
 	statsInterface := WebStatsCache.Get(key)
 	if statsInterface == nil {
-		return &ChartResponse{
-			MemberData:  make([]*MemberChartDataPeriod, 0),
-			MessageData: make([]*MessageChartDataPeriod, 0),
-		}
+		return emptyChartData()
 	}
 
 	stats := statsInterface.(*ChartResponse)
 	cop := *stats
-	if fetchDays != days && days != -1 && len(cop.MemberData) > days {
-
-		cop.MemberData = cop.MemberData[:days]
-		cop.MessageData = cop.MessageData[:days]
+	if fetchDays != days && days != -1 && len(cop.Data) > days {
+		cop.Data = cop.Data[:days]
 		cop.Days = days
 	}
 
@@ -256,23 +260,35 @@ func cacheChartFetcher(key string) interface{} {
 	guildID, _ := strconv.ParseInt(split[1], 10, 64)
 	days, _ := strconv.Atoi(split[2])
 
-	memberData, err := RetrieveMemberChartStats(guildID, days)
+	periods, err := RetrieveChartDataPeriods(context.Background(), guildID, time.Now(), days)
 	if err != nil {
-		logger.WithError(err).WithField("cache_key", key).Error("failed retrieving member chart data")
-		return nil
-	}
-
-	messageData, err := RetrieveMessageChartData(guildID, days)
-	if err != nil {
-		logger.WithError(err).WithField("cache_key", key).Error("failed retrieving message chart data")
+		logger.WithError(err).WithField("cache_key", key).Error("failed retrieving chart data")
 		return nil
 	}
 
 	return &ChartResponse{
-		Days:        days,
-		MemberData:  memberData,
-		MessageData: messageData,
+		Days: days,
+		Data: periods,
 	}
+}
+
+func GetConfigWeb(guildID int64) *ServerStatsConfig {
+	config := WebConfigCache.Get(int(guildID))
+	if config == nil {
+		return nil
+	}
+
+	return config.(*ServerStatsConfig)
+}
+
+func cacheConfigFetcher(key int) interface{} {
+	config, err := GetConfig(context.Background(), int64(key))
+	if err != nil {
+		logger.WithError(err).WithField("cache_key", key).Error("failed retrieving stats config")
+		return nil
+	}
+
+	return config
 }
 
 var _ web.PluginWithServerHomeWidget = (*Plugin)(nil)

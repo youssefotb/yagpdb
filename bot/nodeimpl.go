@@ -1,14 +1,16 @@
 package bot
 
 import (
-	"github.com/jonas747/yagpdb/bot/eventsystem"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"sync"
 	"time"
 
-	"github.com/jonas747/dshardorchestrator"
-	"github.com/jonas747/dshardorchestrator/node"
+	"github.com/jonas747/yagpdb/bot/eventsystem"
+
+	"github.com/jonas747/dshardorchestrator/v2"
+	"github.com/jonas747/dshardorchestrator/v2/node"
 	"github.com/jonas747/dstate"
 	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/common"
@@ -35,6 +37,7 @@ func (n *NodeImpl) SessionEstablished(info node.SessionInfo) {
 		totalShardCount = info.TotalShards
 		ShardManager.SetNumShards(totalShardCount)
 		eventsystem.InitWorkers(totalShardCount)
+		ReadyTracker.initTotalShardCount(totalShardCount)
 
 		EventLogger.init(info.TotalShards)
 		go EventLogger.run()
@@ -48,24 +51,12 @@ func (n *NodeImpl) SessionEstablished(info node.SessionInfo) {
 		if err != nil {
 			panic("failed initializing discord sessions: " + err.Error())
 		}
-		InitPlugins()
+		botReady()
 	}
 }
 
 func (n *NodeImpl) StopShard(shard int) (sessionID string, sequence int64) {
-	processShardsLock.Lock()
-	if !common.ContainsIntSlice(processShards, shard) {
-		processShardsLock.Unlock()
-		return "", 0
-	}
-
-	for i, v := range processShards {
-		if v == shard {
-			processShards = append(processShards[:i], processShards[i+1:]...)
-			break
-		}
-	}
-	processShardsLock.Unlock()
+	ReadyTracker.shardRemoved(shard)
 
 	n.lastTimeFreedMemorymu.Lock()
 	freeMem := false
@@ -88,20 +79,26 @@ func (n *NodeImpl) StopShard(shard int) (sessionID string, sequence int64) {
 	return
 }
 
-func (n *NodeImpl) StartShard(shard int, sessionID string, sequence int64) {
-	processShardsLock.Lock()
-	if common.ContainsIntSlice(processShards, shard) {
-		processShardsLock.Unlock()
-		return
-	}
-	processShards = append(processShards, shard)
-	processShardsLock.Unlock()
+func (n *NodeImpl) ResumeShard(shard int, sessionID string, sequence int64) {
+	ReadyTracker.shardsAdded(shard)
 
 	ShardManager.Sessions[shard].GatewayManager.SetSessionInfo(sessionID, sequence)
 	err := ShardManager.Sessions[shard].GatewayManager.Open()
 	if err != nil {
 		logger.WithError(err).Error("Failed migrating shard")
 	}
+}
+
+func (n *NodeImpl) AddNewShards(shards ...int) {
+	ReadyTracker.shardsAdded(shards...)
+
+	for _, shard := range shards {
+		ShardManager.Sessions[shard].GatewayManager.SetSessionInfo("", 0)
+
+		go ShardManager.Sessions[shard].GatewayManager.Open()
+	}
+
+	logger.Infof("got assigned shards %v", shards)
 }
 
 // called when the bot should shut down, make sure to send EvtShutdown when completed
@@ -158,7 +155,7 @@ func (n *NodeImpl) SendGuilds(shard int) int {
 	guildsToSend := make([]*dstate.GuildState, 0)
 	State.RLock()
 	for _, v := range State.Guilds {
-		shardID := GuildShardID(v.ID)
+		shardID := guildShardID(v.ID)
 		if int(shardID) == shard {
 			guildsToSend = append(guildsToSend, v)
 		}
@@ -194,7 +191,14 @@ func (n *NodeImpl) SendGuilds(shard int) int {
 		wg.Done()
 	}
 
-	for i := 0; i < 10; i++ {
+	// spawn runtime.NumCPU - 2 workers
+	numCpu := runtime.NumCPU()
+	numWorkers := numCpu - 2
+	if numWorkers < 2 {
+		numWorkers = 2
+	}
+
+	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go worker()
 	}
@@ -220,6 +224,8 @@ func (n *NodeImpl) LoadGuildState(gs *dstate.GuildState) {
 	for _, m := range gs.Members {
 		m.Guild = gs
 	}
+
+	gs.InitCache(State)
 
 	State.Lock()
 	State.Guilds[gs.ID] = gs

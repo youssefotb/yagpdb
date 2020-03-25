@@ -41,7 +41,7 @@
     <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.css" />
     <link rel="stylesheet" href="/static/vendor/animate/animate.css">
 
-    <link rel="stylesheet" href="/static/vendor/font-awesome/css/fontawesome-all.min.css" />
+    <link rel="stylesheet" href="/static/vendor/font-awesome/css/all.min.css" />
     <link rel="stylesheet" href="/static/vendor/magnific-popup/magnific-popup.css" />
     <link rel="stylesheet" href="/static/vendor/bootstrap-datepicker/css/bootstrap-datepicker3.css" />
 
@@ -86,7 +86,7 @@
             </div>
         </section>
     </div>
-    <section class="body">
+    <section class="body" style="margin-bottom: 150px;">
         {{template "cp_nav_header" .}}
 
         <div class="inner-wrapper">
@@ -99,6 +99,12 @@
             </section>
         </div>
     </section>
+    <div id="unsaved-changes-popup" hidden>
+        <div id="unsaved-changes-popup-container">
+            <p id="unsaved-changes-message" class="mb-0">blablablablabla</p>
+            <input id="unsaved-changes-save-button" type="button" class="btn btn-success ml-3" value="Save!" onclick="saveUnsavedChanges()">
+        </p>
+    </div>
 
     <script>
     var visibleURL;
@@ -142,7 +148,14 @@
 {{define "cp_alerts"}}
 <script>
 $(function(){
-    showAlerts("{{json .Alerts}}")
+    showAlerts("{{json .Alerts}}");
+    $.getJSON("https://srhpyqt94yxb.statuspage.io/api/v2/incidents/unresolved.json", function(data) {
+        if (data.incidents) {
+            data.incidents.forEach(function(incident) {
+                addAlert("warning", "Discord's " + incident.status + " an incident: " + incident.name + ". Functionality may be limited.");
+            })
+        }
+    });
 })
 </script>
 <div id="alerts">

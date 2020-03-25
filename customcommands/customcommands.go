@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dstate"
@@ -47,6 +48,11 @@ func (p *Plugin) PluginInfo() *common.PluginInfo {
 type CommandTriggerType int
 
 const (
+	// The ordering of these might seem weird, but they're used in a database so changes would require migrations of a lot of data
+	// yeah... i wish i was smarter when i made this originally
+
+	CommandTriggerNone CommandTriggerType = 10
+
 	CommandTriggerCommand    CommandTriggerType = 0
 	CommandTriggerStartsWith CommandTriggerType = 1
 	CommandTriggerContains   CommandTriggerType = 2
@@ -116,6 +122,8 @@ type CustomCommand struct {
 	Roles        []int64 `json:"roles" schema:"roles"`
 
 	GroupID int64
+
+	ShowErrors bool `schema:"show_errors"`
 }
 
 var _ web.CustomValidator = (*CustomCommand)(nil)
@@ -141,8 +149,9 @@ func (cc *CustomCommand) Validate(tmpl web.TemplateData) (ok bool) {
 
 	combinedSize := 0
 	for _, v := range cc.Responses {
-		combinedSize += len(v)
+		combinedSize += utf8.RuneCountInString(v)
 	}
+
 	if combinedSize > 10000 {
 		tmpl.AddAlerts(web.ErrorAlert("Max combined command size can be 10k"))
 		return false
@@ -170,6 +179,8 @@ func (cc *CustomCommand) ToDBModel() *models.CustomCommand {
 		ReactionTriggerMode: int16(cc.ReactionTriggerMode),
 
 		Responses: cc.Responses,
+
+		ShowErrors: cc.ShowErrors,
 	}
 
 	if cc.TimeTriggerExcludingDays == nil {

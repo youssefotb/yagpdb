@@ -3,7 +3,6 @@ package customcommands
 import (
 	"context"
 	"fmt"
-	"github.com/jonas747/yagpdb/premium"
 	"math/rand"
 	"regexp"
 	"runtime/debug"
@@ -12,6 +11,9 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jonas747/yagpdb/analytics"
+	"github.com/jonas747/yagpdb/premium"
 
 	"emperror.dev/errors"
 	"github.com/jonas747/dcmd"
@@ -52,7 +54,7 @@ var _ bot.BotInitHandler = (*Plugin)(nil)
 var _ commands.CommandProvider = (*Plugin)(nil)
 
 func (p *Plugin) AddCommands() {
-	commands.AddRootCommands(cmdListCommands)
+	commands.AddRootCommands(p, cmdListCommands)
 }
 
 func (p *Plugin) BotInit() {
@@ -66,7 +68,7 @@ func (p *Plugin) BotInit() {
 			return
 		}
 
-		gs.UserCacheDel(true, CacheKeyCommands)
+		gs.UserCacheDel(CacheKeyCommands)
 	}, nil)
 
 	scheduledevents2.RegisterHandler("cc_next_run", NextRunScheduledEvent{}, handleNextRunScheduledEVent)
@@ -100,9 +102,20 @@ var cmdListCommands = &commands.YAGCommand{
 			return "Failed retrieving custom commands", err
 		}
 
+		groups, err := models.CustomCommandGroups(qm.Where("guild_id=?", data.GS.ID)).AllG(data.Context())
+		if err != nil {
+			return "Failed retrieving custom command groups", err
+		}
+
+		groupMap := make(map[int64]string)
+		groupMap[0] = "Ungrouped"
+		for _, group := range groups {
+			groupMap[group.ID] = group.Name
+		}
+
 		foundCCS, provided := FindCommands(ccs, data)
 		if len(foundCCS) < 1 {
-			list := StringCommands(ccs)
+			list := StringCommands(ccs, groupMap)
 			if len(list) == 0 {
 				return "This server has no custom commands, sry.", nil
 			}
@@ -114,13 +127,16 @@ var cmdListCommands = &commands.YAGCommand{
 		}
 
 		if len(foundCCS) > 1 {
-			return "More than 1 matched command\n" + StringCommands(foundCCS), nil
+			return "More than 1 matched command\n" + StringCommands(foundCCS, groupMap), nil
 		}
 
 		cc := foundCCS[0]
 
-		return fmt.Sprintf("#%d - %s: `%s` - Case sensitive trigger: `%t` \n```\n%s\n```",
-			cc.LocalID, CommandTriggerType(cc.TriggerType), cc.TextTrigger, cc.TextTriggerCaseSensitive, strings.Join(cc.Responses, "```\n```")), nil
+		if cc.TextTrigger != "" {
+			return fmt.Sprintf("#%d - %s: `%s` - Case sensitive trigger: `%t` - Group: `%s`\n```\n%s\n```", cc.LocalID, CommandTriggerType(cc.TriggerType), cc.TextTrigger, cc.TextTriggerCaseSensitive, groupMap[cc.GroupID.Int64], strings.Join(cc.Responses, "```\n```")), nil
+		} else {
+			return fmt.Sprintf("#%d - %s - Group: `%s`\n```\n%s\n```", cc.LocalID, CommandTriggerType(cc.TriggerType), groupMap[cc.GroupID.Int64], strings.Join(cc.Responses, "```\n```")), nil
+		}
 	},
 }
 
@@ -151,14 +167,14 @@ func FindCommands(ccs []*models.CustomCommand, data *dcmd.Data) (foundCCS []*mod
 	return
 }
 
-func StringCommands(ccs []*models.CustomCommand) string {
+func StringCommands(ccs []*models.CustomCommand, gMap map[int64]string) string {
 	out := ""
 	for _, cc := range ccs {
 		switch cc.TextTrigger {
 		case "":
-			out += fmt.Sprintf("`#%3d: `%s\n", cc.LocalID, CommandTriggerType(cc.TriggerType).String())
+			out += fmt.Sprintf("`#%3d:` %s - Group: `%s`\n", cc.LocalID, CommandTriggerType(cc.TriggerType).String(), gMap[cc.GroupID.Int64])
 		default:
-			out += fmt.Sprintf("`#%3d:` `%s`: %s\n", cc.LocalID, cc.TextTrigger, CommandTriggerType(cc.TriggerType).String())
+			out += fmt.Sprintf("`#%3d:` `%s`: %s - Group: `%s`\n", cc.LocalID, cc.TextTrigger, CommandTriggerType(cc.TriggerType).String(), gMap[cc.GroupID.Int64])
 		}
 	}
 
@@ -309,12 +325,19 @@ func handleMessageReactions(evt *eventsystem.EventData) {
 		reaction = e.MessageReaction
 	}
 
-	if reaction.GuildID == 0 {
+	if reaction.GuildID == 0 || reaction.UserID == common.BotUser.ID {
+		// ignore dm reactions and reactions from the bot
 		return
 	}
 
 	ms, err := bot.GetMember(reaction.GuildID, reaction.UserID)
 	if err != nil {
+		if common.IsDiscordErr(err, discordgo.ErrCodeUnknownMember) {
+			// example scenario: removing reactions of a user that's not on the server
+			// (reactions aren't cleared automatically when a user leaves)
+			return
+		}
+
 		logger.WithError(err).WithField("guild", reaction.GuildID).Error("failed fetching guild member")
 		return
 	}
@@ -538,14 +561,15 @@ func ExecuteCustomCommand(cmd *models.CustomCommand, tmplCtx *templates.Context)
 			case string:
 				actualErr = t
 			}
-			onExecError(errors.New(actualErr), tmplCtx, true)
+			onExecPanic(cmd, errors.New(actualErr), tmplCtx, true)
 		}
 	}()
 
 	tmplCtx.Name = "CC #" + strconv.Itoa(int(cmd.LocalID))
 	tmplCtx.Data["CCID"] = cmd.LocalID
+	tmplCtx.Data["CCRunCount"] = cmd.RunCount + 1
 
-	csCop := tmplCtx.CS.Copy(true)
+	csCop := tmplCtx.CurrentFrame.CS.Copy(true)
 	f := logger.WithFields(logrus.Fields{
 		"trigger":      cmd.TextTrigger,
 		"trigger_type": CommandTriggerType(cmd.TriggerType).String(),
@@ -561,11 +585,13 @@ func ExecuteCustomCommand(cmd *models.CustomCommand, tmplCtx *templates.Context)
 	lockHandle := CCExecLock.Lock(lockKey, time.Minute, time.Minute*10)
 	if lockHandle == -1 {
 		f.Warn("Exceeded max lock attempts for cc")
-		common.BotSession.ChannelMessageSend(tmplCtx.CS.ID, fmt.Sprintf("Gave up trying to execute custom command #%d after 1 minute because there is already one or more instances of it being executed.", cmd.LocalID))
+		common.BotSession.ChannelMessageSend(tmplCtx.CurrentFrame.CS.ID, fmt.Sprintf("Gave up trying to execute custom command #%d after 1 minute because there is already one or more instances of it being executed.", cmd.LocalID))
 		return nil
 	}
 
 	defer CCExecLock.Unlock(lockKey, lockHandle)
+
+	go analytics.RecordActiveUnit(cmd.GuildID, &Plugin{}, "executed_cc")
 
 	// pick a response and execute it
 	f.Info("Custom command triggered")
@@ -577,40 +603,25 @@ func ExecuteCustomCommand(cmd *models.CustomCommand, tmplCtx *templates.Context)
 		out = "Custom command response was longer than 2k (contact an admin on the server...)"
 	}
 
+	go updatePostCommandRan(cmd, err)
+
 	// deal with the results
 	if err != nil {
 		logger.WithField("guild", tmplCtx.GS.ID).WithError(err).Error("Error executing custom command")
-		out += "\nAn error caused the execution of the custom command template to stop:\n"
-		out += "`" + common.EscapeSpecialMentions(err.Error()) + "`"
-	}
-
-	for _, v := range tmplCtx.EmebdsToSend {
-		common.BotSession.ChannelMessageSendEmbed(tmplCtx.CS.ID, v)
-	}
-
-	if strings.TrimSpace(out) != "" && (!tmplCtx.DelResponse || tmplCtx.DelResponseDelay > 0) {
-		m, err := common.BotSession.ChannelMessageSend(tmplCtx.CS.ID, out)
-		if err != nil {
-			logger.WithError(err).Error("Failed sending message")
-		} else {
-			if tmplCtx.DelResponse {
-				templates.MaybeScheduledDeleteMessage(tmplCtx.GS.ID, tmplCtx.CS.ID, m.ID, tmplCtx.DelResponseDelay)
-			}
-
-			if len(tmplCtx.AddResponseReactionNames) > 0 {
-				go func() {
-					for _, v := range tmplCtx.AddResponseReactionNames {
-						common.BotSession.MessageReactionAdd(m.ChannelID, m.ID, v)
-					}
-				}()
-			}
+		if cmd.ShowErrors {
+			out += "\nAn error caused the execution of the custom command template to stop:\n"
+			out += "`" + err.Error() + "`"
 		}
 	}
 
+	_, err = tmplCtx.SendResponse(out)
+	if err != nil {
+		return errors.WithStackIf(err)
+	}
 	return nil
 }
 
-func onExecError(err error, tmplCtx *templates.Context, logStack bool) {
+func onExecPanic(cmd *models.CustomCommand, err error, tmplCtx *templates.Context, logStack bool) {
 	l := logger.WithField("guild", tmplCtx.GS.ID).WithError(err)
 	if logStack {
 		stack := string(debug.Stack())
@@ -618,10 +629,38 @@ func onExecError(err error, tmplCtx *templates.Context, logStack bool) {
 	}
 
 	l.Error("Error executing custom command")
-	out := "\nAn error caused the execution of the custom command template to stop:\n"
-	out += "`" + common.EscapeSpecialMentions(err.Error()) + "`"
 
-	common.BotSession.ChannelMessageSend(tmplCtx.CS.ID, out)
+	if cmd.ShowErrors {
+		out := "\nAn error caused the execution of the custom command template to stop:\n"
+		out += "`" + err.Error() + "`"
+
+		common.BotSession.ChannelMessageSend(tmplCtx.CurrentFrame.CS.ID, out)
+	}
+
+	updatePostCommandRan(cmd, err)
+}
+
+func updatePostCommandRan(cmd *models.CustomCommand, runErr error) {
+	const qNoErr = "UPDATE custom_commands SET run_count = run_count + 1 WHERE guild_id=$1 AND local_id=$2"
+	const qErr = "UPDATE custom_commands SET run_count = run_count + 1, last_error=$3, last_error_time=now() WHERE guild_id=$1 AND local_id=$2"
+
+	var err error
+	if runErr == nil {
+		_, err = common.PQ.Exec(qNoErr, cmd.GuildID, cmd.LocalID)
+	} else {
+		_, err = common.PQ.Exec(qErr, cmd.GuildID, cmd.LocalID, runErr.Error())
+	}
+
+	if err != nil {
+		logger.WithError(err).WithField("guild", cmd.GuildID).Error("failed running post command executed query")
+	}
+
+	if runErr != nil {
+		err := pubsub.Publish("custom_commands_clear_cache", cmd.GuildID, nil)
+		if err != nil {
+			logger.WithError(err).Error("failed creating cache eviction pubsub event in updatePostCommandRan")
+		}
+	}
 }
 
 // CheckMatch returns true if the given cmd matches, as well as the arguments
@@ -638,16 +677,16 @@ func CheckMatch(globalPrefix string, cmd *models.CustomCommand, msg string) (mat
 	switch CommandTriggerType(cmd.TriggerType) {
 	case CommandTriggerCommand:
 		// Regex is:
-		// ^(<@!?bot_id> ?|server_cmd_prefix)trigger($|[[:space:]])
-		cmdMatch += "^(<@!?" + discordgo.StrID(common.BotUser.ID) + "> ?|" + regexp.QuoteMeta(globalPrefix) + ")" + regexp.QuoteMeta(trigger) + "($|[[:space:]])"
+		// \A(<@!?bot_id> ?|server_cmd_prefix)trigger(\z|[[:space:]])
+		cmdMatch += `\A(<@!?` + discordgo.StrID(common.BotUser.ID) + "> ?|" + regexp.QuoteMeta(globalPrefix) + ")" + regexp.QuoteMeta(trigger) + `(\z|[[:space:]])`
 	case CommandTriggerStartsWith:
-		cmdMatch += "^" + regexp.QuoteMeta(trigger)
+		cmdMatch += `\A` + regexp.QuoteMeta(trigger)
 	case CommandTriggerContains:
-		cmdMatch += "^.*" + regexp.QuoteMeta(trigger)
+		cmdMatch += `\A.*` + regexp.QuoteMeta(trigger)
 	case CommandTriggerRegex:
 		cmdMatch += trigger
 	case CommandTriggerExact:
-		cmdMatch += "^" + regexp.QuoteMeta(trigger) + "$"
+		cmdMatch += `\A` + regexp.QuoteMeta(trigger) + `\z`
 	default:
 		return false, "", nil
 	}
@@ -716,7 +755,7 @@ const (
 )
 
 func BotCachedGetCommandsWithMessageTriggers(gs *dstate.GuildState, ctx context.Context) ([]*models.CustomCommand, error) {
-	v, err := gs.UserCacheFetch(true, CacheKeyCommands, func() (interface{}, error) {
+	v, err := gs.UserCacheFetch(CacheKeyCommands, func() (interface{}, error) {
 		return models.CustomCommands(qm.Where("guild_id = ? AND trigger_type IN (0,1,2,3,4,6)", gs.Guild.ID), qm.OrderBy("local_id desc"), qm.Load("Group")).AllG(ctx)
 	})
 

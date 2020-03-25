@@ -2,6 +2,10 @@ package reminders
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/jinzhu/gorm"
 	"github.com/jonas747/dcmd"
 	"github.com/jonas747/discordgo"
@@ -10,9 +14,6 @@ import (
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/scheduledevents2"
 	seventsmodels "github.com/jonas747/yagpdb/common/scheduledevents2/models"
-	"strconv"
-	"strings"
-	"time"
 )
 
 var logger = common.GetPluginLogger(&Plugin{})
@@ -21,7 +22,7 @@ var _ bot.BotInitHandler = (*Plugin)(nil)
 var _ commands.CommandProvider = (*Plugin)(nil)
 
 func (p *Plugin) AddCommands() {
-	commands.AddRootCommands(cmds...)
+	commands.AddRootCommands(p, cmds...)
 }
 
 func (p *Plugin) BotInit() {
@@ -52,7 +53,7 @@ var cmds = []*commands.YAGCommand{
 
 			durString := common.HumanizeDuration(common.DurationPrecisionSeconds, fromNow)
 			when := time.Now().Add(fromNow)
-			tStr := when.Format(time.RFC822)
+			tStr := when.UTC().Format(time.RFC822)
 
 			if when.After(time.Now().Add(time.Hour * 24 * 366)) {
 				return "Can be max 365 days from now...", nil

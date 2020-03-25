@@ -90,7 +90,9 @@ const (
 	EmojiPrev = "⬅"
 )
 
-func CreatePaginatedMessage(guildID, channelID int64, initPage, maxPages int, pagerFunc func(p *PaginatedMessage, page int) (*discordgo.MessageEmbed, error)) (*PaginatedMessage, error) {
+type PagerFunc func(p *PaginatedMessage, page int) (*discordgo.MessageEmbed, error)
+
+func CreatePaginatedMessage(guildID, channelID int64, initPage, maxPages int, pagerFunc PagerFunc) (*PaginatedMessage, error) {
 	if initPage < 1 {
 		initPage = 1
 	}
@@ -172,7 +174,9 @@ func (p *PaginatedMessage) HandleReactionAdd(ra *discordgo.MessageReactionAdd) {
 	newMsg, err := p.Navigate(p, newPage)
 	if err != nil {
 		if err == ErrNoResults {
-			newPage--
+			if pageMod == 1 {
+				newPage--
+			}
 			if newPage < 1 {
 				newPage = 1
 			}

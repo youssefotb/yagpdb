@@ -4,6 +4,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html"
+	"html/template"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+
+	"github.com/jonas747/yagpdb/analytics"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/scheduledevents2"
 	"github.com/jonas747/yagpdb/verification/models"
@@ -13,12 +21,6 @@ import (
 	"github.com/volatiletech/null"
 	"github.com/volatiletech/sqlboiler/boil"
 	"goji.io/pat"
-	"html"
-	"html/template"
-	"net/http"
-	"net/url"
-	"strconv"
-	"time"
 )
 
 type FormData struct {
@@ -39,6 +41,7 @@ func (p *Plugin) InitWeb() {
 	web.AddSidebarItem(web.SidebarCategoryTools, &web.SidebarItem{
 		Name: "Verification",
 		URL:  "verification",
+		Icon: "fas fa-address-card",
 	})
 
 	getHandler := web.ControllerHandler(p.handleGetSettings, "cp_verification_settings")
@@ -50,7 +53,7 @@ func (p *Plugin) InitWeb() {
 	web.CPMux.Handle(pat.Post("/verification"), web.RequireGuildChannelsMiddleware(postHandler))
 
 	getVerifyPageHandler := web.ControllerHandler(p.handleGetVerifyPage, "verification_verify_page")
-	postVerifyPageHandler := web.ControllerPostHandler(p.handlePostVerifyPage, getVerifyPageHandler, nil, "verification_verify_page")
+	postVerifyPageHandler := web.ControllerPostHandler(p.handlePostVerifyPage, getVerifyPageHandler, nil, "")
 	web.ServerPublicMux.Handle(pat.Get("/verify/:user_id/:token"), getVerifyPageHandler)
 	web.ServerPublicMux.Handle(pat.Post("/verify/:user_id/:token"), postVerifyPageHandler)
 }
@@ -221,6 +224,9 @@ func (p *Plugin) handlePostVerifyPage(w http.ResponseWriter, r *http.Request) (w
 		scheduledevents2.ScheduleEvent("verification_user_verified", g.ID, time.Now(), userID)
 		verSession.SolvedAt = null.TimeFrom(time.Now())
 		verSession.UpdateG(ctx, boil.Infer())
+
+		go analytics.RecordActiveUnit(g.ID, p, "completed")
+
 	} else {
 		templateData.AddAlerts(web.ErrorAlert("Invalid reCAPTCHA submission."))
 	}

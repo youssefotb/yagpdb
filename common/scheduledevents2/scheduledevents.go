@@ -5,11 +5,12 @@ package scheduledevents2
 import (
 	"context"
 	"encoding/json"
-	"math/rand"
 	"reflect"
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/volatiletech/null"
 
 	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
@@ -104,6 +105,7 @@ var _ bot.LateBotInitHandler = (*ScheduledEvents)(nil)
 var _ bot.BotStopperHandler = (*ScheduledEvents)(nil)
 
 func (se *ScheduledEvents) LateBotInit() {
+	registerBuiltinEvents()
 	running = true
 	go se.runCheckLoop()
 	go se.MigrateLegacyEvents()
@@ -139,7 +141,7 @@ func (se *ScheduledEvents) check() {
 	numSkipped := 0
 	numHandling := 0
 	for _, p := range toProcess {
-		if !bot.IsGuildOnCurrentProcess(p.GuildID) {
+		if !bot.ReadyTracker.IsGuildShardReady(p.GuildID) {
 			numSkipped++
 			continue
 		}
@@ -152,7 +154,7 @@ func (se *ScheduledEvents) check() {
 				logger.WithError(err).WithField("guild", p.GuildID).Error("failed checking if bot is on guild")
 			} else if !onGuild {
 				logger.WithField("guild", p.GuildID).Info("completely skipping event from guild not joined")
-				go se.markDone(p)
+				go se.markDone(p, bot.ErrGuildNotOnProcess)
 				continue
 			}
 
@@ -191,7 +193,7 @@ func (se *ScheduledEvents) processItem(item *models.ScheduledEvent) {
 	handler, ok := registeredHandlers[item.EventName]
 	if !ok {
 		l.Error("unknown event: ", item.EventName)
-		se.markDone(item)
+		se.markDone(item, errors.NewPlain("No registered handler"))
 		return
 	}
 
@@ -204,7 +206,7 @@ func (se *ScheduledEvents) processItem(item *models.ScheduledEvent) {
 		err := json.Unmarshal(item.Data, decodedData)
 		if err != nil {
 			l.WithError(err).Error("failed decoding event data")
-			se.markDone(item)
+			se.markDone(item, errors.WithMessage(err, "json"))
 			return
 		}
 	}
@@ -216,25 +218,36 @@ func (se *ScheduledEvents) processItem(item *models.ScheduledEvent) {
 		}
 	}()
 
-	for {
-		retry, err := handler.Handler(item, decodedData)
+	retryDelay := time.Second
+	var err error
+	for nRetry := 0; nRetry < 10; nRetry++ {
+		var retry bool
+		retry, err = handler.Handler(item, decodedData)
 		if err != nil {
 			l.WithError(err).Error("handler returned an error")
 		}
 
 		if retry {
 			l.WithError(err).Warn("retrying handling event")
-			time.Sleep(time.Second * time.Duration(rand.Intn(10)+5))
+			time.Sleep(retryDelay)
+			retryDelay *= 2
+			if retryDelay > time.Second*10 {
+				retryDelay = time.Second * 10
+			}
 			continue
 		}
 
-		se.markDone(item)
 		break
 	}
+
+	se.markDone(item, err)
 }
 
-func (se *ScheduledEvents) markDone(item *models.ScheduledEvent) {
+func (se *ScheduledEvents) markDone(item *models.ScheduledEvent, runErr error) {
 	item.Processed = true
+	if runErr != nil {
+		item.Error = null.StringFrom(runErr.Error())
+	}
 	_, err := item.UpdateG(context.Background(), boil.Whitelist("processed"))
 
 	se.currentlyProcessingMU.Lock()

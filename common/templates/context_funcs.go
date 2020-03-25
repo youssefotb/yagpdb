@@ -4,18 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/jonas747/dstate"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/jonas747/yagpdb/common/scheduledevents2"
-
 	"github.com/jonas747/discordgo"
+	"github.com/jonas747/dstate"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/common"
+	"github.com/jonas747/yagpdb/common/scheduledevents2"
 )
 
 var ErrTooManyCalls = errors.New("Too many calls to this function")
@@ -55,9 +54,9 @@ func (c *Context) ChannelArg(v interface{}) int64 {
 	defer c.GS.RUnlock()
 
 	// Look for the channel
-	if v == nil && c.CS != nil {
+	if v == nil && c.CurrentFrame.CS != nil {
 		// No channel passed, assume current channel
-		return c.CS.ID
+		return c.CurrentFrame.CS.ID
 	}
 
 	verifiedExistence := false
@@ -102,7 +101,104 @@ func (c *Context) ChannelArg(v interface{}) int64 {
 	return cid
 }
 
+func (c *Context) tmplSendTemplateDM(name string, data ...interface{}) (interface{}, error) {
+	return c.sendNestedTemplate(nil, true, name, data...)
+}
+
+func (c *Context) tmplSendTemplate(channel interface{}, name string, data ...interface{}) (interface{}, error) {
+	return c.sendNestedTemplate(channel, false, name, data...)
+}
+
+func (c *Context) sendNestedTemplate(channel interface{}, dm bool, name string, data ...interface{}) (interface{}, error) {
+	if c.IncreaseCheckCallCounter("exec_child", 3) {
+		return "", ErrTooManyCalls
+	}
+	if name == "" {
+		return "", errors.New("No template name passed")
+	}
+	if c.CurrentFrame.isNestedTemplate {
+		return "", errors.New("Can't call this in a nested template")
+	}
+
+	t := c.CurrentFrame.parsedTemplate.Lookup(name)
+	if t == nil {
+		return "", errors.New("Unknown template")
+	}
+
+	var cs *dstate.ChannelState
+	// find the new context channel
+	if !dm {
+		if channel == nil {
+			cs = c.CurrentFrame.CS
+		} else {
+			cID := c.ChannelArg(channel)
+			if cID == 0 {
+				return "", errors.New("Unknown channel")
+			}
+
+			cs = c.GS.ChannelCopy(true, cID)
+			if cs == nil {
+				return "", errors.New("Unknown channel")
+			}
+		}
+	} else {
+		if c.CurrentFrame.SendResponseInDM {
+			cs = c.CurrentFrame.CS
+		} else {
+			ch, err := common.BotSession.UserChannelCreate(c.MS.ID)
+			if err != nil {
+				return "", err
+			}
+
+			cs = &dstate.ChannelState{
+				Owner: c.GS,
+				Guild: c.GS,
+				ID:    ch.ID,
+				Name:  c.MS.Username,
+				Type:  discordgo.ChannelTypeDM,
+			}
+		}
+	}
+
+	oldFrame := c.newContextFrame(cs)
+	defer func() {
+		c.CurrentFrame = oldFrame
+	}()
+
+	if dm {
+		c.CurrentFrame.SendResponseInDM = oldFrame.SendResponseInDM
+	} else if channel == nil {
+		// inherit
+		c.CurrentFrame.SendResponseInDM = oldFrame.SendResponseInDM
+	}
+
+	// pass some data
+	if len(data) > 1 {
+		c.Data["TemplateArgs"], _ = Dictionary(data...)
+	} else if len(data) == 1 {
+		c.Data["TemplateArgs"] = data[0]
+	}
+
+	// and finally execute the child template
+	c.CurrentFrame.parsedTemplate = t
+	resp, err := c.executeParsed()
+	if err != nil {
+		return "", err
+	}
+
+	m, err := c.SendResponse(resp)
+	if err != nil {
+		return "", err
+	}
+	return m.ID, err
+}
+
 func (c *Context) tmplSendMessage(filterSpecialMentions bool, returnID bool) func(channel interface{}, msg interface{}) interface{} {
+	parseMentions := []discordgo.AllowedMentionType{discordgo.AllowedMentionTypeUsers}
+	if !filterSpecialMentions {
+		parseMentions = append(parseMentions, discordgo.AllowedMentionTypeRoles, discordgo.AllowedMentionTyeEveryone)
+	}
+
 	return func(channel interface{}, msg interface{}) interface{} {
 		if c.IncreaseCheckGenericAPICall() {
 			return ""
@@ -114,18 +210,24 @@ func (c *Context) tmplSendMessage(filterSpecialMentions bool, returnID bool) fun
 		}
 
 		var m *discordgo.Message
-		var err error
-		if embed, ok := msg.(*discordgo.MessageEmbed); ok {
-			m, err = common.BotSession.ChannelMessageSendEmbed(cid, embed)
-		} else {
-			strMsg := fmt.Sprint(msg)
-
-			if filterSpecialMentions {
-				strMsg = common.EscapeSpecialMentions(strMsg)
-			}
-
-			m, err = common.BotSession.ChannelMessageSend(cid, strMsg)
+		msgSend := &discordgo.MessageSend{
+			AllowedMentions: discordgo.AllowedMentions{
+				Parse: parseMentions,
+			},
 		}
+		var err error
+
+		switch typedMsg := msg.(type) {
+
+		case *discordgo.MessageEmbed:
+			msgSend.Embed = typedMsg
+		case *discordgo.MessageSend:
+			msgSend = typedMsg
+		default:
+			msgSend.Content = fmt.Sprint(msg)
+		}
+
+		m, err = common.BotSession.ChannelMessageSendComplex(cid, msgSend)
 
 		if err == nil && returnID {
 			return m.ID
@@ -147,19 +249,29 @@ func (c *Context) tmplEditMessage(filterSpecialMentions bool) func(channel inter
 		}
 
 		mID := ToInt64(msgID)
-
-		var err error
-		if embed, ok := msg.(*discordgo.MessageEmbed); ok {
-			_, err = common.BotSession.ChannelMessageEditEmbed(cid, mID, embed)
-		} else {
-			strMsg := fmt.Sprint(msg)
-
-			if filterSpecialMentions {
-				strMsg = common.EscapeSpecialMentions(strMsg)
-			}
-
-			_, err = common.BotSession.ChannelMessageEdit(cid, mID, strMsg)
+		msgEdit := &discordgo.MessageEdit{
+			ID:      mID,
+			Channel: cid,
 		}
+		var err error
+
+		switch typedMsg := msg.(type) {
+
+		case *discordgo.MessageEmbed:
+			msgEdit.Embed = typedMsg
+		case *discordgo.MessageEdit:
+			//If both Embed and string are explicitly set as null, give an error message.
+			if typedMsg.Content != nil && strings.TrimSpace(*typedMsg.Content) == "" && typedMsg.Embed != nil && typedMsg.Embed.GetMarshalNil() {
+				return "", errors.New("both content and embed cannot be null")
+			}
+			msgEdit.Content = typedMsg.Content
+			msgEdit.Embed = typedMsg.Embed
+		default:
+			temp := fmt.Sprint(msg)
+			msgEdit.Content = &temp
+		}
+
+		_, err = common.BotSession.ChannelMessageEditComplex(msgEdit)
 
 		if err != nil {
 			return "", err
@@ -170,12 +282,12 @@ func (c *Context) tmplEditMessage(filterSpecialMentions bool) func(channel inter
 }
 
 func (c *Context) tmplMentionEveryone() string {
-	c.MentionEveryone = true
+	c.CurrentFrame.MentionEveryone = true
 	return " @everyone "
 }
 
 func (c *Context) tmplMentionHere() string {
-	c.MentionHere = true
+	c.CurrentFrame.MentionHere = true
 	return " @here "
 }
 
@@ -201,11 +313,11 @@ func (c *Context) tmplMentionRoleID(roleID interface{}) string {
 		return "(role not found)"
 	}
 
-	if common.ContainsInt64Slice(c.MentionRoles, role) {
+	if common.ContainsInt64Slice(c.CurrentFrame.MentionRoles, role) {
 		return "<@&" + discordgo.StrID(role) + ">"
 	}
 
-	c.MentionRoles = append(c.MentionRoles, role)
+	c.CurrentFrame.MentionRoles = append(c.CurrentFrame.MentionRoles, role)
 	return " <@&" + discordgo.StrID(role) + "> "
 }
 
@@ -218,8 +330,8 @@ func (c *Context) tmplMentionRoleName(role string) string {
 	c.GS.RLock()
 	for _, r := range c.GS.Guild.Roles {
 		if r.Name == role {
-			if !common.ContainsInt64Slice(c.MentionRoles, r.ID) {
-				c.MentionRoles = append(c.MentionRoles, r.ID)
+			if !common.ContainsInt64Slice(c.CurrentFrame.MentionRoles, r.ID) {
+				c.CurrentFrame.MentionRoles = append(c.CurrentFrame.MentionRoles, r.ID)
 				found = r
 			}
 		}
@@ -269,6 +381,17 @@ func targetUserID(input interface{}) int64 {
 	switch t := input.(type) {
 	case *discordgo.User:
 		return t.ID
+	case string:
+		str := strings.TrimSpace(t)
+		if strings.HasPrefix(str, "<@") && strings.HasSuffix(str, ">") && (len(str) > 4) {
+			trimmed := str[2 : len(str)-1]
+			if trimmed[0] == '!' {
+				trimmed = trimmed[1:]
+			}
+			str = trimmed
+		}
+
+		return ToInt64(str)
 	default:
 		return ToInt64(input)
 	}
@@ -563,8 +686,8 @@ func (c *Context) tmplDelResponse(args ...interface{}) string {
 		dur = 86400
 	}
 
-	c.DelResponseDelay = dur
-	c.DelResponse = true
+	c.CurrentFrame.DelResponseDelay = dur
+	c.CurrentFrame.DelResponse = true
 	return ""
 }
 
@@ -598,6 +721,62 @@ func (c *Context) tmplDelMessage(channel, msgID interface{}, args ...interface{}
 	return ""
 }
 
+//Deletes reactions from a message either via reaction trigger or argument-set of emojis,
+//needs channelID, messageID, userID, list of emojis - up to twenty
+//can be run once per CC.
+func (c *Context) tmplDelMessageReaction(values ...reflect.Value) (reflect.Value, error) {
+
+	f := func(args []reflect.Value) (reflect.Value, error) {
+		if len(args) < 4 {
+			return reflect.Value{}, errors.New("Not enough arguments (need channelID, messageID, userID, emoji)")
+		}
+
+		var cArg interface{}
+		if args[0].IsValid() {
+			cArg = args[0].Interface()
+		}
+
+		cID := c.ChannelArg(cArg)
+		if cID == 0 {
+			return reflect.ValueOf("non-existing channel"), nil
+		}
+
+		mID := ToInt64(args[1].Interface())
+		uID := targetUserID(args[2].Interface())
+
+		for _, reaction := range args[3:] {
+
+			if c.IncreaseCheckCallCounter("del_reaction_message", 10) {
+				return reflect.Value{}, ErrTooManyCalls
+			}
+
+			if err := common.BotSession.MessageReactionRemove(cID, mID, reaction.String(), uID); err != nil {
+				return reflect.Value{}, err
+			}
+		}
+		return reflect.ValueOf(""), nil
+	}
+
+	return callVariadic(f, false, values...)
+}
+
+func (c *Context) tmplDelAllMessageReactions(channel, msgID interface{}) (string, error) {
+	if c.IncreaseCheckGenericAPICall() {
+		return "", ErrTooManyAPICalls
+	}
+
+	cID := c.ChannelArg(channel)
+	if cID == 0 {
+		return "", nil
+	}
+
+	mID := ToInt64(msgID)
+
+	common.BotSession.MessageReactionsRemoveAll(cID, mID)
+
+	return "", nil
+}
+
 func (c *Context) tmplGetMessage(channel, msgID interface{}) (*discordgo.Message, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return nil, ErrTooManyAPICalls
@@ -614,12 +793,15 @@ func (c *Context) tmplGetMessage(channel, msgID interface{}) (*discordgo.Message
 	return message, nil
 }
 
-func (c *Context) tmplGetMember(id interface{}) (*discordgo.Member, error) {
+func (c *Context) tmplGetMember(target interface{}) (*discordgo.Member, error) {
 	if c.IncreaseCheckGenericAPICall() {
 		return nil, ErrTooManyAPICalls
 	}
 
-	mID := ToInt64(id)
+	mID := targetUserID(target)
+	if mID == 0 {
+		return nil, nil
+	}
 
 	member, _ := bot.GetMember(c.GS.ID, mID)
 	if member == nil {
@@ -627,6 +809,27 @@ func (c *Context) tmplGetMember(id interface{}) (*discordgo.Member, error) {
 	}
 
 	return member.DGoCopy(), nil
+}
+
+func (c *Context) tmplGetChannel(channel interface{}) (*dstate.ChannelState, error) {
+
+	if c.IncreaseCheckGenericAPICall() {
+		return nil, ErrTooManyAPICalls
+	}
+
+	cID := c.ChannelArg(channel)
+	if cID == 0 {
+		return nil, nil //dont send an error , a nil output would indicate invalid/unknown channel
+	}
+
+	cstate := c.GS.ChannelCopy(true, cID)
+
+	if cstate == nil {
+		return nil, errors.New("Channel not in state")
+	}
+
+	return cstate, nil
+
 }
 
 func (c *Context) tmplAddReactions(values ...reflect.Value) (reflect.Value, error) {
@@ -657,7 +860,7 @@ func (c *Context) tmplAddResponseReactions(values ...reflect.Value) (reflect.Val
 				return reflect.Value{}, ErrTooManyCalls
 			}
 
-			c.AddResponseReactionNames = append(c.AddResponseReactionNames, reaction.String())
+			c.CurrentFrame.AddResponseReactionNames = append(c.CurrentFrame.AddResponseReactionNames, reaction.String())
 		}
 		return reflect.ValueOf(""), nil
 	}
@@ -815,6 +1018,28 @@ func (c *Context) tmplEditChannelName(channel interface{}, newName string) (stri
 	return "", err
 }
 
+func (c *Context) tmplEditChannelTopic(channel interface{}, newTopic string) (string, error) {
+	if c.IncreaseCheckCallCounter("edit_channel", 10) {
+		return "", ErrTooManyCalls
+	}
+
+	cID := c.ChannelArg(channel)
+	if cID == 0 {
+		return "", errors.New("Unknown channel")
+	}
+
+	if c.IncreaseCheckCallCounter("edit_channel_"+strconv.FormatInt(cID, 10), 2) {
+		return "", ErrTooManyCalls
+	}
+
+	edit := &discordgo.ChannelEdit{
+		Topic: newTopic,
+	}
+
+	_, err := common.BotSession.ChannelEditComplex(cID, edit)
+	return "", err
+}
+
 func (c *Context) tmplOnlineCount() (int, error) {
 	if c.IncreaseCheckCallCounter("online_users", 1) {
 		return 0, ErrTooManyCalls
@@ -830,4 +1055,47 @@ func (c *Context) tmplOnlineCount() (int, error) {
 	c.GS.RUnlock()
 
 	return online, nil
+}
+
+func (c *Context) tmplOnlineCountBots() (int, error) {
+	if c.IncreaseCheckCallCounter("online_bots", 1) {
+		return 0, ErrTooManyCalls
+	}
+
+	botCount := 0
+
+	c.GS.RLock()
+	defer c.GS.RUnlock()
+
+	for _, v := range c.GS.Members {
+		if v.Bot && v.PresenceSet && v.PresenceStatus != dstate.StatusOffline {
+			botCount++
+		}
+	}
+
+	return botCount, nil
+}
+
+func (c *Context) tmplEditNickname(Nickname string) (string, error) {
+
+	if c.IncreaseCheckCallCounter("edit_nick", 2) {
+		return "", ErrTooManyCalls
+	}
+
+	if c.MS == nil {
+		return "", nil
+	}
+
+	if strings.Compare(c.MS.Nick, Nickname) == 0 {
+
+		return "", nil
+
+	}
+
+	err := common.BotSession.GuildMemberNickname(c.GS.ID, c.MS.ID, Nickname)
+	if err != nil {
+		return "", err
+	}
+
+	return "", nil
 }

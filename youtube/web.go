@@ -18,7 +18,7 @@ import (
 	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/web"
-	"github.com/mediocregopher/radix"
+	"github.com/mediocregopher/radix/v3"
 	"goji.io"
 	"goji.io/pat"
 )
@@ -38,12 +38,12 @@ type Form struct {
 }
 
 func (p *Plugin) InitWeb() {
-	tmplPath := "templates/plugins/youtube.html"
-	if common.Testing {
-		tmplPath = "../../youtube/assets/youtube.html"
-	}
-
-	web.Templates = template.Must(web.Templates.ParseFiles(tmplPath))
+	web.LoadHTMLTemplate("../../youtube/assets/youtube.html", "templates/plugins/youtube.html")
+	web.AddSidebarItem(web.SidebarCategoryFeeds, &web.SidebarItem{
+		Name: "Youtube",
+		URL:  "youtube",
+		Icon: "fab fa-youtube",
+	})
 
 	ytMux := goji.SubMux()
 	web.CPMux.Handle(pat.New("/youtube/*"), ytMux)
@@ -129,7 +129,7 @@ func BaseEditHandler(inner web.ControllerHandlerFunc) web.ControllerHandlerFunc 
 
 		id := pat.Param(r, "item")
 
-		// Get tha actual watch item from the config
+		// Get the actual watch item from the config
 		var sub ChannelSubscription
 		err := common.GORM.Model(&ChannelSubscription{}).Where("id = ?", id).First(&sub).Error
 		if err != nil {

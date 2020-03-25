@@ -3,6 +3,13 @@ package rsvp
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/common"
@@ -10,12 +17,6 @@ import (
 	"github.com/jonas747/yagpdb/rsvp/models"
 	"github.com/jonas747/yagpdb/timezonecompanion"
 	"github.com/volatiletech/sqlboiler/boil"
-	"regexp"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
-	"unicode/utf8"
 )
 
 type SetupState int
@@ -180,7 +181,8 @@ func (s *SetupSession) handleMessageSetupStateWhen(m *discordgo.Message) {
 		registeredTimezone = time.UTC
 	}
 
-	t, err := dateParser.Parse(m.Content, time.Now().In(registeredTimezone))
+	now := time.Now().In(registeredTimezone)
+	t, err := dateParser.Parse(m.Content, now)
 	// t, err := dateparse.ParseAny(m.Content)
 	if err != nil || t == nil {
 		s.sendMessage("Couldn't understand that date, Please try changing the format a little bit and try again\n||Error: %v||", err)
@@ -190,7 +192,9 @@ func (s *SetupSession) handleMessageSetupStateWhen(m *discordgo.Message) {
 	s.When = t.Time
 	s.State = SetupStateWhenConfirm
 
-	s.sendMessage("Set the starting time of the event to **%s**, is this correct? (`yes/no`)", t.Time.Format("02 Jan 2006 15:04 MST"))
+	in := common.HumanizeDuration(common.DurationPrecisionMinutes, t.Time.Sub(now))
+
+	s.sendMessage("Set the starting time of the event to **%s** (in **%s**), is this correct? (`yes/no`)", t.Time.Format("02 Jan 2006 15:04 MST"), in)
 }
 
 func (s *SetupSession) handleMessageSetupStateWhenConfirm(m *discordgo.Message) {
@@ -342,7 +346,7 @@ func (s *SetupSession) remove() {
 }
 
 func (s *SetupSession) sendMessage(msgf string, args ...interface{}) {
-	m, err := common.BotSession.ChannelMessageSend(s.SetupChannel, "[RSVP Event Setup]: "+common.EscapeSpecialMentions(fmt.Sprintf(msgf, args...)))
+	m, err := common.BotSession.ChannelMessageSend(s.SetupChannel, "[RSVP Event Setup]: "+fmt.Sprintf(msgf, args...))
 	if err != nil {
 		logger.WithError(err).WithField("guild", s.GuildID).WithField("channel", s.SetupChannel).Error("failed sending setup message")
 	} else {

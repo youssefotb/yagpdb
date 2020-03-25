@@ -1,10 +1,10 @@
 package bot
 
 import (
-	"emperror.dev/errors"
 	"runtime/debug"
 	"time"
 
+	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/bot/eventsystem"
@@ -17,6 +17,7 @@ import (
 
 func addBotHandlers() {
 	eventsystem.AddHandlerFirstLegacy(BotPlugin, HandleReady, eventsystem.EventReady)
+	eventsystem.AddHandlerFirstLegacy(BotPlugin, HandleMessageCreateUpdateFirst, eventsystem.EventMessageCreate, eventsystem.EventMessageUpdate)
 	eventsystem.AddHandlerSecondLegacy(BotPlugin, StateHandler, eventsystem.EventAll)
 
 	eventsystem.AddHandlerAsyncLastLegacy(BotPlugin, EventLogger.handleEvent, eventsystem.EventAll)
@@ -41,6 +42,7 @@ func addBotHandlers() {
 	eventsystem.AddHandlerAsyncLastLegacy(BotPlugin, HandleReactionAdd, eventsystem.EventMessageReactionAdd)
 	eventsystem.AddHandlerAsyncLastLegacy(BotPlugin, HandleMessageCreate, eventsystem.EventMessageCreate)
 	eventsystem.AddHandlerAsyncLastLegacy(BotPlugin, HandleRatelimit, eventsystem.EventRateLimit)
+	eventsystem.AddHandlerAsyncLastLegacy(BotPlugin, ReadyTracker.handleReadyOrResume, eventsystem.EventReady, eventsystem.EventResumed)
 }
 
 func HandleReady(data *eventsystem.EventData) {
@@ -143,7 +145,7 @@ func HandleGuildDelete(evt *eventsystem.EventData) (retry bool, err error) {
 	}
 
 	logger.WithFields(logrus.Fields{
-		"g_name": evt.GuildDelete().Name,
+		"guild": evt.GuildDelete().ID,
 	}).Info("Left guild")
 
 	go guildRemoved(evt.GuildDelete().ID)
@@ -279,6 +281,29 @@ func HandleMessageCreate(evt *eventsystem.EventData) {
 	err := pubsub.Publish("dm_message", -1, mc)
 	if err != nil {
 		logger.WithError(err).Error("failed publishing dm message")
+	}
+}
+
+// HandleMessageCreateUpdateFirst transforms the message events a little to make them easier to deal with
+// Message.Member.User is null from the api, so we assign it to Message.Author
+func HandleMessageCreateUpdateFirst(evt *eventsystem.EventData) {
+	if evt.Type == eventsystem.EventMessageCreate {
+		msg := evt.MessageCreate()
+		if !IsNormalUserMessage(msg.Message) {
+			return
+		}
+
+		if msg.Member != nil {
+			msg.Member.User = msg.Author
+		}
+
+	} else {
+		edit := evt.MessageUpdate()
+		if !IsNormalUserMessage(edit.Message) {
+			return
+		}
+
+		edit.Member.User = edit.Author
 	}
 }
 

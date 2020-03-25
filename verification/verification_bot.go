@@ -3,10 +3,17 @@ package verification
 import (
 	"context"
 	"database/sql"
-	"emperror.dev/errors"
 	"fmt"
+	"math/rand"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dstate"
+	"github.com/jonas747/yagpdb/analytics"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/bot/eventsystem"
 	"github.com/jonas747/yagpdb/common"
@@ -18,11 +25,6 @@ import (
 	"github.com/jonas747/yagpdb/web"
 	"github.com/volatiletech/sqlboiler/boil"
 	"github.com/volatiletech/sqlboiler/queries/qm"
-	"math/rand"
-	"strings"
-	"sync"
-	"time"
-	"unicode/utf8"
 )
 
 const InTicketPerms = discordgo.PermissionSendMessages | discordgo.PermissionReadMessages
@@ -74,6 +76,8 @@ func (p *Plugin) handleMemberJoin(evt *eventsystem.EventData) {
 	if !conf.Enabled {
 		return
 	}
+
+	go analytics.RecordActiveUnit(m.GuildID, p, "process_started")
 
 	go p.startVerificationProcess(conf, m.GuildID, m.User)
 }
@@ -156,7 +160,7 @@ func (p *Plugin) startVerificationProcess(conf *models.VerificationConfig, guild
 		scheduledevents2.ScheduleEvent("verification_user_kick", guildID, time.Now().Add(time.Minute*time.Duration(conf.KickUnverifiedAfter)), evt)
 	}
 
-	p.logAction(conf.LogChannel, target, "New user joined waiting to be verified as a human", 0x47aaed)
+	p.logAction(guildID, conf.LogChannel, target, "New user joined waiting to be verified as a human", 0x47aaed)
 }
 
 func ScheduledEventMW(innerHandler func(ms *dstate.MemberState, guildID int64, conf *models.VerificationConfig, rawData interface{}) (bool, error)) func(evt *seventsmodels.ScheduledEvent, data interface{}) (retry bool, err error) {
@@ -223,7 +227,7 @@ func (p *Plugin) handleUserVerifiedScheduledEvent(ms *dstate.MemberState, guildI
 	}
 
 	if !confVerificationTrackIPs.GetBool() || model.IP == "" {
-		p.logAction(conf.LogChannel, ms.DGoUser(), "User successfully verified", 0x49ed47)
+		p.logAction(guildID, conf.LogChannel, ms.DGoUser(), "User successfully verified", 0x49ed47)
 		return false, nil
 	}
 
@@ -234,7 +238,7 @@ func (p *Plugin) handleUserVerifiedScheduledEvent(ms *dstate.MemberState, guildI
 	}
 
 	if len(conflicts) < 1 {
-		p.logAction(conf.LogChannel, ms.DGoUser(), "User successfully verified", 0x49ed47)
+		p.logAction(guildID, conf.LogChannel, ms.DGoUser(), "User successfully verified", 0x49ed47)
 		return false, nil
 	}
 
@@ -254,12 +258,12 @@ func (p *Plugin) handleUserVerifiedScheduledEvent(ms *dstate.MemberState, guildI
 			banReason = string(r) + "..."
 		}
 
-		err := moderation.BanUser(nil, guildID, 0, common.BotUser, banReason, ms.DGoUser())
+		err := moderation.BanUser(nil, guildID, nil, nil, common.BotUser, banReason, ms.DGoUser())
 		if err != nil {
 			return scheduledevents2.CheckDiscordErrRetry(err), err
 		}
 
-		p.logAction(conf.LogChannel, ms.DGoUser(), fmt.Sprintf("User banned for sharing IP with banned user %s#%s (%d)\nReason: %s",
+		p.logAction(guildID, conf.LogChannel, ms.DGoUser(), fmt.Sprintf("User banned for sharing IP with banned user %s#%s (%d)\nReason: %s",
 			ban.User.Username, ban.User.Discriminator, ban.User.ID, ban.Reason), 0xef4640)
 
 		return false, nil
@@ -277,7 +281,7 @@ func (p *Plugin) handleUserVerifiedScheduledEvent(ms *dstate.MemberState, guildI
 		}
 	}
 
-	p.logAction(conf.LogChannel, ms.DGoUser(), builder.String(), 0xff8228)
+	p.logAction(guildID, conf.LogChannel, ms.DGoUser(), builder.String(), 0xff8228)
 	return false, nil
 }
 
@@ -407,13 +411,13 @@ func (p *Plugin) handleKickUser(ms *dstate.MemberState, guildID int64, conf *mod
 
 	err = common.BotSession.GuildMemberDelete(guildID, ms.ID)
 	if err == nil {
-		p.logAction(conf.LogChannel, ms.DGoUser(), "Kicked for not verifying within deadline", 0xef4640)
+		p.logAction(guildID, conf.LogChannel, ms.DGoUser(), "Kicked for not verifying within deadline", 0xef4640)
 	}
 
 	return scheduledevents2.CheckDiscordErrRetry(err), err
 }
 
-func (p *Plugin) logAction(channelID int64, author *discordgo.User, action string, color int) {
+func (p *Plugin) logAction(guildID int64, channelID int64, author *discordgo.User, action string, color int) {
 	if channelID == 0 {
 		return
 	}
@@ -428,7 +432,21 @@ func (p *Plugin) logAction(channelID int64, author *discordgo.User, action strin
 	})
 
 	if err != nil {
-		logger.WithError(err).WithField("channel", channelID).Error("failed sending log message")
+		if common.IsDiscordErr(err, discordgo.ErrCodeMissingPermissions, discordgo.ErrCodeUnknownChannel) {
+			go p.disableLogChannel(guildID)
+		} else {
+			logger.WithError(err).WithField("channel", channelID).Error("failed sending log message")
+		}
+	}
+}
+
+func (p *Plugin) disableLogChannel(guildID int64) {
+	logger.WithField("guild", guildID).Warnf("disabling log channel due to it being unavailable or missing perms")
+
+	const q = `UPDATE verification_configs SET log_channel=0 WHERE guild_id=$1`
+	_, err := common.PQ.Exec(q, guildID)
+	if err != nil {
+		logger.WithField("guild", guildID).WithError(err).Error("failed disabling log channel")
 	}
 }
 
@@ -560,7 +578,7 @@ func (p *Plugin) banAlts(ban *discordgo.GuildBanAdd, alts []*discordgo.User) {
 				logger.WithField("guild", ban.GuildID).WithField("user", v.ID).WithField("dupe-of", ban.User.ID).Info("banning alt account")
 				reason := fmt.Sprintf("Alt of banned user (%s#%s (%d))", ban.User.Username, ban.User.Discriminator, ban.User.ID)
 				markRecentlyBannedByVerification(ban.GuildID, v.ID)
-				moderation.BanUser(nil, ban.GuildID, 0, common.BotUser, reason, v)
+				moderation.BanUser(nil, ban.GuildID, nil, nil, common.BotUser, reason, v)
 				continue
 			}
 		}

@@ -4,13 +4,13 @@ package eventsystem
 
 import (
 	"context"
-	"github.com/jonas747/dstate"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jonas747/discordgo"
+	"github.com/jonas747/dstate"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/sirupsen/logrus"
 )
@@ -261,6 +261,31 @@ func HandleEvent(s *discordgo.Session, evt interface{}) {
 	}
 }
 
+func QueueEventNonDiscord(evtData *EventData) {
+	if evtData.Session != nil {
+		ctx := context.WithValue(evtData.Context(), common.ContextKeyDiscordSession, evtData.Session)
+		evtData.ctx = ctx
+	} else {
+		handleEvent(evtData)
+		return
+	}
+
+	s := evtData.Session
+	if s.ShardID >= len(workers) || workers[s.ShardID] == nil {
+		logrus.Errorf("bad shard event: sid: %d, len: %d", s.ShardID, len(workers))
+		return
+	}
+
+	select {
+	case workers[s.ShardID] <- evtData:
+		return
+	default:
+		// go common.SendOwnerAlert("Max events in queue!")
+		logrus.Errorf("Max events in queue: %d, %d", len(workers[s.ShardID]), s.ShardID)
+		workers[s.ShardID] <- evtData // attempt to send it anyways for now
+	}
+}
+
 // CS will attempt to fetch the channel state from either cached, or state, or return nil if nonexistent (e.g a channel create before the state has been populated by it)
 func (d *EventData) CS() *dstate.ChannelState {
 	d.l.Lock()
@@ -294,7 +319,7 @@ func InitWorkers(totalShards int) {
 
 	workers = make([]chan *EventData, totalShards)
 	for i, _ := range workers {
-		workers[i] = make(chan *EventData, 1000)
+		workers[i] = make(chan *EventData, 5000)
 		go eventWorker(workers[i])
 	}
 }

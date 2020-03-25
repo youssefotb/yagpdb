@@ -6,8 +6,9 @@ import (
 	"time"
 
 	"emperror.dev/errors"
+	"github.com/jinzhu/gorm"
 	"github.com/jonas747/discordgo"
-	"github.com/jonas747/dshardorchestrator"
+	"github.com/jonas747/dshardorchestrator/v2"
 	"github.com/jonas747/dstate"
 	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/bot"
@@ -36,7 +37,7 @@ var _ bot.BotInitHandler = (*Plugin)(nil)
 var _ bot.ShardMigrationReceiver = (*Plugin)(nil)
 
 func (p *Plugin) AddCommands() {
-	commands.AddRootCommands(ModerationCommands...)
+	commands.AddRootCommands(p, ModerationCommands...)
 }
 
 func (p *Plugin) BotInit() {
@@ -53,7 +54,7 @@ func (p *Plugin) BotInit() {
 	eventsystem.AddHandlerAsyncLast(p, LockMemberMuteMW(HandleGuildMemberUpdate), eventsystem.EventGuildMemberUpdate)
 
 	eventsystem.AddHandlerAsyncLastLegacy(p, bot.ConcurrentEventHandler(HandleGuildCreate), eventsystem.EventGuildCreate)
-	eventsystem.AddHandlerAsyncLast(p, HandleChannelCreateUpdate, eventsystem.EventChannelUpdate, eventsystem.EventChannelUpdate)
+	eventsystem.AddHandlerAsyncLast(p, HandleChannelCreateUpdate, eventsystem.EventChannelCreate, eventsystem.EventChannelUpdate)
 
 	pubsub.AddHandler("mod_refresh_mute_override", HandleRefreshMuteOverrides, nil)
 }
@@ -161,8 +162,12 @@ func RefreshMuteOverrideForChannel(config *Config, channel *discordgo.Channel) {
 		}
 	}
 
+	MuteDeniedChannelPermsFinal := MuteDeniedChannelPerms
+	if config.MuteDisallowReactionAdd {
+		MuteDeniedChannelPermsFinal = MuteDeniedChannelPermsFinal | discordgo.PermissionAddReactions
+	}
 	allows := 0
-	denies := MuteDeniedChannelPerms
+	denies := MuteDeniedChannelPermsFinal
 	changed := true
 
 	if override != nil {
@@ -170,15 +175,15 @@ func RefreshMuteOverrideForChannel(config *Config, channel *discordgo.Channel) {
 		denies = override.Deny
 		changed = false
 
-		if (allows & MuteDeniedChannelPerms) != 0 {
+		if (allows & MuteDeniedChannelPermsFinal) != 0 {
 			// One of the mute permissions was in the allows, remove it
-			allows &= ^MuteDeniedChannelPerms
+			allows &= ^MuteDeniedChannelPermsFinal
 			changed = true
 		}
 
-		if (denies & MuteDeniedChannelPerms) != MuteDeniedChannelPerms {
+		if (denies & MuteDeniedChannelPermsFinal) != MuteDeniedChannelPermsFinal {
 			// Missing one of the mute permissions
-			denies |= MuteDeniedChannelPerms
+			denies |= MuteDeniedChannelPermsFinal
 			changed = true
 		}
 	}
@@ -266,7 +271,7 @@ func HandleGuildBanAddRemove(evt *eventsystem.EventData) {
 		reason = "Timed ban expired"
 	}
 
-	err = CreateModlogEmbed(config.IntActionChannel(), author, action, user, reason, "")
+	err = CreateModlogEmbed(config, author, action, user, reason, "")
 	if err != nil {
 		logger.WithError(err).WithField("guild", guildID).Error("Failed sending " + action.Prefix + " log message")
 	}
@@ -302,7 +307,7 @@ func checkAuditLogMemberRemoved(config *Config, data *discordgo.GuildMemberRemov
 		return
 	}
 
-	err := CreateModlogEmbed(config.IntActionChannel(), author, MAKick, data.User, entry.Reason, "")
+	err := CreateModlogEmbed(config, author, MAKick, data.User, entry.Reason, "")
 	if err != nil {
 		logger.WithError(err).WithField("guild", data.GuildID).Error("Failed sending kick log message")
 	}
@@ -313,31 +318,32 @@ func checkAuditLogMemberRemoved(config *Config, data *discordgo.GuildMemberRemov
 func LockMemberMuteMW(next eventsystem.HandlerFunc) eventsystem.HandlerFunc {
 	return func(evt *eventsystem.EventData) (retry bool, err error) {
 		var userID int64
-		var guild int64
 		// TODO: add utility functions to the eventdata struct for fetching things like these?
 		if evt.Type == eventsystem.EventGuildMemberAdd {
 			userID = evt.GuildMemberAdd().User.ID
-			guild = evt.GuildMemberAdd().GuildID
 		} else if evt.Type == eventsystem.EventGuildMemberUpdate {
 			userID = evt.GuildMemberUpdate().User.ID
-			guild = evt.GuildMemberUpdate().GuildID
 		} else {
 			panic("Unknown event in lock memebr mute middleware")
-		}
-
-		// If there's less than 5 seconds of the mute left, don't bother doing anything
-		var muteLeft int
-		common.RedisPool.Do(retryableredis.Cmd(&muteLeft, "TTL", RedisKeyMutedUser(guild, userID)))
-		if muteLeft < 5 {
-			return false, nil
 		}
 
 		LockMute(userID)
 		defer UnlockMute(userID)
 
-		// The situation may have changed at this point, check again
-		common.RedisPool.Do(retryableredis.Cmd(&muteLeft, "TTL", RedisKeyMutedUser(guild, userID)))
-		if muteLeft < 5 {
+		guildID := evt.GS.ID
+
+		var currentMute MuteModel
+		err = common.GORM.Where(MuteModel{UserID: userID, GuildID: guildID}).First(&currentMute).Error
+		if err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return false, nil
+			}
+
+			return false, errors.WithStackIf(err)
+		}
+
+		// Don't bother doing anythign if this mute is almost up
+		if !currentMute.ExpiresAt.IsZero() && currentMute.ExpiresAt.Sub(time.Now()) < 5*time.Second {
 			return false, nil
 		}
 
@@ -483,7 +489,7 @@ func handleScheduledUnmute(evt *seventsmodels.ScheduledEvent, data interface{}) 
 		return scheduledevents2.CheckDiscordErrRetry(err), err
 	}
 
-	err = MuteUnmuteUser(nil, false, evt.GuildID, 0, common.BotUser, "Mute Duration Expired", member, 0)
+	err = MuteUnmuteUser(nil, false, evt.GuildID, nil, nil, common.BotUser, "Mute Duration Expired", member, 0)
 	if errors.Cause(err) != ErrNoMuteRole {
 		return scheduledevents2.CheckDiscordErrRetry(err), err
 	}

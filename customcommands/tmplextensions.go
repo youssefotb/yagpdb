@@ -166,7 +166,7 @@ func tmplRunCC(ctx *templates.Context) interface{} {
 			return "", templates.ErrTooManyCalls
 		}
 
-		cmd, err := models.FindCustomCommandG(context.Background(), int64(ccID), ctx.GS.ID)
+		cmd, err := models.FindCustomCommandG(context.Background(), ctx.GS.ID, int64(ccID))
 		if err != nil {
 			return "", errors.New("Couldn't find custom command")
 		}
@@ -243,7 +243,7 @@ func tmplScheduleUniqueCC(ctx *templates.Context) interface{} {
 			return "", templates.ErrTooManyCalls
 		}
 
-		cmd, err := models.FindCustomCommandG(context.Background(), int64(ccID), ctx.GS.ID)
+		cmd, err := models.FindCustomCommandG(context.Background(), ctx.GS.ID, int64(ccID))
 		if err != nil {
 			return "", errors.New("Couldn't find custom command")
 		}
@@ -286,7 +286,7 @@ func tmplScheduleUniqueCC(ctx *templates.Context) interface{} {
 
 		// since this is a unique, remove existing ones
 		_, err = scheduledmodels.ScheduledEvents(
-			qm.Where("event_name='cc_delayed_run' AND  guild_id = ? AND (data->>'user_key')::bigint = ? AND (data->>'cmd_id')::bigint = ? AND processed = false",
+			qm.Where("event_name='cc_delayed_run' AND  guild_id = ? AND (data->>'user_key')::text = ? AND (data->>'cmd_id')::bigint = ? AND processed = false",
 				ctx.GS.ID, stringedKey, cmd.LocalID)).DeleteAll(context.Background(), common.PQ)
 		if err != nil {
 			return "", err
@@ -312,7 +312,7 @@ func tmplCancelUniqueCC(ctx *templates.Context) interface{} {
 
 		// since this is a unique, remove existing ones
 		_, err := scheduledmodels.ScheduledEvents(
-			qm.Where("event_name='cc_delayed_run' AND  guild_id = ? AND (data->>'user_key')::bigint = ? AND (data->>'cmd_id')::bigint = ? AND processed = false",
+			qm.Where("event_name='cc_delayed_run' AND  guild_id = ? AND (data->>'user_key')::text = ? AND (data->>'cmd_id')::bigint = ? AND processed = false",
 				ctx.GS.ID, stringedKey, ccID)).DeleteAll(context.Background(), common.PQ)
 		if err != nil {
 			return "", err
@@ -439,7 +439,7 @@ func tmplDBGetPattern(ctx *templates.Context, inverse bool) interface{} {
 			return "", templates.ErrTooManyCalls
 		}
 
-		if ctx.IncreaseCheckCallCounterPremium("db_multiple", 1, 10) {
+		if ctx.IncreaseCheckCallCounterPremium("db_multiple", 2, 10) {
 			return "", templates.ErrTooManyCalls
 		}
 
@@ -467,7 +467,7 @@ func tmplDBDel(ctx *templates.Context) interface{} {
 			return "", templates.ErrTooManyCalls
 		}
 
-		ctx.GS.UserCacheDel(true, CacheKeyDBLimits)
+		ctx.GS.UserCacheDel(CacheKeyDBLimits)
 
 		keyStr := limitString(templates.ToString(key), 256)
 		_, err := models.TemplatesUserDatabases(qm.Where("guild_id = ? AND user_id = ? AND key = ?", ctx.GS.ID, userID, keyStr)).DeleteAll(context.Background(), common.PQ)
@@ -482,7 +482,7 @@ func tmplDBDelById(ctx *templates.Context) interface{} {
 			return "", templates.ErrTooManyCalls
 		}
 
-		ctx.GS.UserCacheDel(true, CacheKeyDBLimits)
+		ctx.GS.UserCacheDel(CacheKeyDBLimits)
 
 		_, err := models.TemplatesUserDatabases(qm.Where("guild_id = ? AND user_id = ? AND id = ?", ctx.GS.ID, userID, id)).DeleteAll(context.Background(), common.PQ)
 
@@ -491,33 +491,48 @@ func tmplDBDelById(ctx *templates.Context) interface{} {
 }
 
 func tmplDBCount(ctx *templates.Context) interface{} {
-	return func(variadicUserID ...int64) (interface{}, error) {
+	return func(variadicArg ...interface{}) (interface{}, error) {
 		if ctx.IncreaseCheckCallCounterPremium("db_interactions", 10, 50) {
 			return "", templates.ErrTooManyCalls
 		}
 
-		if ctx.IncreaseCheckCallCounterPremium("db_multiple", 1, 10) {
+		if ctx.IncreaseCheckCallCounterPremium("db_multiple", 2, 10) {
 			return "", templates.ErrTooManyCalls
 		}
 
 		var userID null.Int64
-		if len(variadicUserID) > 0 {
-			userID.Int64 = variadicUserID[0]
-			userID.Valid = true
+		var key null.String
+		if len(variadicArg) > 0 {
+
+			switch arg := variadicArg[0].(type) {
+			case int64:
+				userID.Int64 = arg
+				userID.Valid = true
+			case int:
+				userID.Int64 = int64(arg)
+				userID.Valid = true
+			case string:
+				keyStr := limitString(arg, 256)
+				key.String = keyStr
+				key.Valid = true
+			default:
+				return "", errors.New("Invalid Argument Data Type")
+			}
+
 		}
 
-		const q = `SELECT count(*) FROM templates_user_database WHERE (guild_id = $1) AND ($2::bigint IS NULL OR user_id = $2) AND (expires_at IS NULL or expires_at > now())`
+		const q = `SELECT count(*) FROM templates_user_database WHERE (guild_id = $1) AND ($2::bigint IS NULL OR user_id = $2) AND ($3::text IS NULL OR key = $3) AND (expires_at IS NULL or expires_at > now())`
 
 		var count int64
-		err := common.PQ.QueryRow(q, ctx.GS.ID, userID).Scan(&count)
+		err := common.PQ.QueryRow(q, ctx.GS.ID, userID, key).Scan(&count)
 		return count, err
 	}
 }
 
 func tmplDBTopEntries(ctx *templates.Context, bottom bool) interface{} {
-	orderBy := "value_num DESC"
+	orderBy := "value_num DESC, id DESC"
 	if bottom {
-		orderBy = "value_num ASC"
+		orderBy = "value_num ASC, id ASC"
 	}
 
 	return func(pattern interface{}, iAmount interface{}, iSkip interface{}) (interface{}, error) {
@@ -525,7 +540,7 @@ func tmplDBTopEntries(ctx *templates.Context, bottom bool) interface{} {
 			return "", templates.ErrTooManyCalls
 		}
 
-		if ctx.IncreaseCheckCallCounterPremium("db_multiple", 1, 10) {
+		if ctx.IncreaseCheckCallCounterPremium("db_multiple", 2, 10) {
 			return "", templates.ErrTooManyCalls
 		}
 
@@ -579,7 +594,7 @@ func getGuildCCDBNumValues(guildID int64) (int64, error) {
 }
 
 func cacheCheckDBLimit(gs *dstate.GuildState) (int64, error) {
-	v, err := gs.UserCacheFetch(true, CacheKeyDBLimits, func() (interface{}, error) {
+	v, err := gs.UserCacheFetch(CacheKeyDBLimits, func() (interface{}, error) {
 		n, err := getGuildCCDBNumValues(gs.ID)
 		return n, err
 	})

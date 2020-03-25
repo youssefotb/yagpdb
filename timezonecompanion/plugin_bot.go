@@ -4,6 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
+	"strings"
+	"time"
+
 	"github.com/jonas747/dcmd"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/yagpdb/bot"
@@ -13,9 +17,6 @@ import (
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/timezonecompanion/models"
 	"github.com/volatiletech/sqlboiler/boil"
-	"math"
-	"strings"
-	"time"
 )
 
 var _ bot.BotInitHandler = (*Plugin)(nil)
@@ -26,7 +27,7 @@ func (p *Plugin) BotInit() {
 }
 
 func (p *Plugin) AddCommands() {
-	commands.AddRootCommands(&commands.YAGCommand{
+	commands.AddRootCommands(p, &commands.YAGCommand{
 		CmdCategory: commands.CategoryTool,
 		Name:        "settimezone",
 		Aliases:     []string{"setz", "tzset"},
@@ -83,6 +84,9 @@ func (p *Plugin) AddCommands() {
 
 			if len(zones) > 1 {
 				if len(zones) > 10 {
+					if parsed.Context().Value(paginatedmessages.CtxKeyNoPagination) != nil {
+						return paginatedTimezones(zones)(nil, 1)
+					}
 					_, err := paginatedmessages.CreatePaginatedMessage(
 						parsed.GS.ID, parsed.CS.ID, 1, int(math.Ceil(float64(len(zones))/10)), paginatedTimezones(zones))
 					return nil, err
@@ -121,7 +125,7 @@ func (p *Plugin) AddCommands() {
 	}, &commands.YAGCommand{
 		CmdCategory:         commands.CategoryTool,
 		Name:                "ToggleTimeConversion",
-		Aliases:             []string{"toggletconv"},
+		Aliases:             []string{"toggletconv", "ttc"},
 		Description:         "Toggles automatic time conversion for people with registered timezones (setz) in this channel, its on by default, toggle all channels by giving it `all`",
 		RequireDiscordPerms: []int64{discordgo.PermissionManageMessages, discordgo.PermissionManageServer},
 		Arguments: []*dcmd.ArgDef{
@@ -298,6 +302,11 @@ func appendIfNotExists(in []string, elem string) []string {
 func (p *Plugin) handleMessageCreate(evt *eventsystem.EventData) {
 	m := evt.MessageCreate()
 	if m.GuildID == 0 {
+		return
+	}
+
+	//Additional check to ensure not reacting to own message
+	if m.Author.ID == common.BotUser.ID {
 		return
 	}
 

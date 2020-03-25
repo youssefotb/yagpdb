@@ -3,18 +3,20 @@ package twitter
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"github.com/dghubble/go-twitter/twitter"
 	"github.com/jonas747/discordgo"
+	"github.com/jonas747/yagpdb/analytics"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/mqueue"
 	"github.com/jonas747/yagpdb/feeds"
 	"github.com/jonas747/yagpdb/premium"
 	"github.com/jonas747/yagpdb/twitter/models"
 	"github.com/volatiletech/sqlboiler/boil"
-	"strconv"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
 var _ feeds.Plugin = (*Plugin)(nil)
@@ -176,7 +178,21 @@ OUTER:
 	webhookUsername := t.User.ScreenName + " • YAGPDB"
 	embed := createTweetEmbed(t)
 	for _, v := range relevantFeeds {
-		mqueue.QueueMessageWebhook("twitter", strconv.FormatInt(v.ID, 10), v.GuildID, v.ChannelID, "", embed, true, webhookUsername)
+		go analytics.RecordActiveUnit(v.GuildID, p, "posted_twitter_message")
+
+		mqueue.QueueMessage(&mqueue.QueuedElement{
+			Source:   "twitter",
+			SourceID: strconv.FormatInt(v.ID, 10),
+
+			Guild:   v.GuildID,
+			Channel: v.ChannelID,
+
+			MessageEmbed:    embed,
+			UseWebhook:      true,
+			WebhookUsername: webhookUsername,
+
+			Priority: 5, // above youtube and reddit
+		})
 	}
 
 	if common.Statsd != nil {

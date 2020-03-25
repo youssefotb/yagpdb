@@ -13,9 +13,11 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
+	"strings"
 	"text/template"
+
+	"golang.org/x/tools/go/packages"
 )
 
 const templateSource = `// GENERATED using events_gen.go
@@ -83,6 +85,12 @@ var NonStandardEvents = []Event{
 	Event{"AllPre", false},
 	Event{"AllPost", false},
 	Event{"MemberFetched", false},
+	// Sent once a shard either resumes or readies for the first time, signifying that its now ready
+	Event{"YagShardReady", false},
+	// Sent one or more shards is either migrated to this node or added freshly
+	Event{"YagShardsAdded", false},
+	// Sent once a shard has been either migrated away or removeotherwise
+	Event{"YagShardRemoved", false},
 }
 
 var (
@@ -103,9 +111,27 @@ func CheckErr(errMsg string, err error) {
 }
 
 func main() {
+	pkgs, err := packages.Load(&packages.Config{
+		Mode: packages.LoadFiles,
+	}, "github.com/jonas747/discordgo")
+
+	if err != nil {
+		panic(err)
+	}
+
+	fPath := ""
+	for _, v := range pkgs {
+		log.Println(v.Name, v.PkgPath, v.GoFiles)
+		for _, p := range v.GoFiles {
+			if strings.HasSuffix(p, "/events.go") {
+				fPath = p
+			}
+		}
+	}
+	log.Println("Found path: ", fPath)
 
 	fs := token.NewFileSet()
-	parsedFile, err := parser.ParseFile(fs, filepath.Join(os.Getenv("GOPATH"), "src/github.com/jonas747/discordgo/events.go"), nil, 0)
+	parsedFile, err := parser.ParseFile(fs, fPath, nil, 0)
 	if err != nil {
 		log.Fatalf("warning: internal error: could not parse events.go: %s", err)
 		return
@@ -118,11 +144,11 @@ func main() {
 	sort.Strings(names)
 
 	// Create the combined event slice
-	events := make([]Event, len(names)+len(NonStandardEvents)-3)
+	events := make([]Event, len(names)+len(NonStandardEvents)-1)
 	copy(events, NonStandardEvents)
 	i := len(NonStandardEvents)
 	for _, name := range names {
-		if name == "Event" || name == "GuildEvent" || name == "ChannelEvent" {
+		if name == "Event" {
 			continue
 		}
 		evt := Event{

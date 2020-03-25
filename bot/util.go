@@ -2,12 +2,11 @@ package bot
 
 import (
 	"context"
-	"emperror.dev/errors"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
+
+	"emperror.dev/errors"
 
 	"github.com/bwmarrin/snowflake"
 	"github.com/jonas747/discordgo"
@@ -28,14 +27,12 @@ func init() {
 	snowflake.Epoch = 1420070400000
 
 	pubsub.FilterFunc = func(guildID int64) (handle bool) {
-		if guildID == -1 || IsGuildOnCurrentProcess(guildID) {
+		if guildID == -1 || ReadyTracker.IsGuildShardReady(guildID) {
 			return true
 		}
 
 		return false
 	}
-
-	pubsub.AddHandler("bot_core_evict_gs_cache", handleEvictCachePubsub, "")
 }
 
 func ContextSession(ctx context.Context) *discordgo.Session {
@@ -226,91 +223,22 @@ func SendMessageEmbedGS(gs *dstate.GuildState, channelID int64, msg *discordgo.M
 	return
 }
 
-// IsGuildOnCurrentProcess returns whether the guild is on one of the shards for this process
-func IsGuildOnCurrentProcess(guildID int64) bool {
-	if !Enabled {
-		return false
-	}
-
-	processShardsLock.RLock()
-
-	shardID := int((guildID >> 22) % int64(totalShardCount))
-	onProcess := common.ContainsIntSlice(processShards, shardID)
-	processShardsLock.RUnlock()
-
-	return onProcess
+// GuildShardID returns the shard id for the provided guild id
+func guildShardID(guildID int64) int {
+	return GuildShardID(getTotalShards(), guildID)
 }
 
 // GuildShardID returns the shard id for the provided guild id
-func GuildShardID(guildID int64) int {
-	totShards := GetTotalShards()
-
-	shardID := int((guildID >> 22) % totShards)
+func GuildShardID(totalShards, guildID int64) int {
+	shardID := int((guildID >> 22) % totalShards)
 	return shardID
 }
 
-var runShardPollerOnce sync.Once
-
-// GetTotalShards either retrieves the total shards from passed command line if the bot is set to run in the same process
-// or it starts a background poller to poll redis for it every second
-func GetTotalShards() int64 {
-	// if the bot is running on this process, then we know the number of total shards
-	if Enabled && totalShardCount != 0 {
-		return int64(totalShardCount)
-	}
-
-	// otherwise we poll it from redis every second
-	runShardPollerOnce.Do(func() {
-		err := fetchTotalShardsFromRedis()
-		if err != nil {
-			panic("failed retrieving shards")
-		}
-
-		go runNumShardsUpdater()
-	})
-
-	return atomic.LoadInt64(redisSetTotalShards)
+func getTotalShards() int64 {
+	return int64(totalShardCount)
 }
 
-var redisSetTotalShards = new(int64)
-
-func runNumShardsUpdater() {
-	t := time.NewTicker(time.Second)
-	for {
-		err := fetchTotalShardsFromRedis()
-		if err != nil {
-			logger.WithError(err).Error("[botrest] failed retrieving total shards")
-		}
-		<-t.C
-	}
-}
-
-func fetchTotalShardsFromRedis() error {
-	var result int64
-	err := common.RedisPool.Do(retryableredis.Cmd(&result, "GET", "yagpdb_total_shards"))
-	if err != nil {
-		return err
-	}
-
-	old := atomic.SwapInt64(redisSetTotalShards, result)
-	if old != result {
-		logger.Info("[botrest] new shard count received: ", old, " -> ", result)
-	}
-
-	return nil
-}
-
-func GetProcessShards() []int {
-	processShardsLock.RLock()
-
-	cop := make([]int, len(processShards))
-	copy(cop, processShards)
-
-	processShardsLock.RUnlock()
-
-	return cop
-}
-
+// NodeID returns this node's ID if using the orchestrator system
 func NodeID() string {
 	if !UsingOrchestrator || NodeConn == nil {
 		return "none"
@@ -319,6 +247,7 @@ func NodeID() string {
 	return NodeConn.GetIDLock()
 }
 
+// RefreshStatus updates the provided sessions status according to the current status set
 func RefreshStatus(session *discordgo.Session) {
 	var streamingURL string
 	var status string
@@ -457,7 +386,7 @@ func evictGSCacheLocal(guildID int64, key GSCacheKey) {
 		return
 	}
 
-	gs.UserCacheDel(true, key)
+	gs.UserCacheDel(key)
 }
 
 type GSCacheKey string
@@ -493,5 +422,16 @@ func CheckDiscordErrRetry(err error) bool {
 	}
 
 	// an unknown error unrelated to the discord api occured (503's for example) attempt a retry
+	return true
+}
+
+func IsNormalUserMessage(msg *discordgo.Message) bool {
+	if msg.Author == nil || msg.Author.ID == common.BotUser.ID || msg.WebhookID != 0 || msg.Author.Discriminator == "0000" || (msg.Member == nil && msg.GuildID != 0) {
+		// message edits can have a nil author, those are embed edits
+		// check against a discrim of 0000 to avoid some cases on webhook messages where webhook_id is 0, even tough its a webhook
+		// discrim is in those 0000 which is a invalid user discrim. (atleast when i was testing)
+		return false
+	}
+
 	return true
 }

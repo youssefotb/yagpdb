@@ -23,11 +23,11 @@ var Command = &commands.YAGCommand{
 			gID = data.Args[0].Int64()
 		}
 
-		shard := bot.GuildShardID(gID)
-		totalShards := bot.GetTotalShards()
+		totalShards := bot.ShardManager.GetNumShards()
+		shard := bot.GuildShardID(int64(totalShards), gID)
 
 		status := ""
-		if bot.IsGuildOnCurrentProcess(gID) {
+		if bot.ReadyTracker.IsGuildOnProcess(gID) {
 			session := bot.ShardManager.SessionForGuild(gID)
 			if session == nil {
 				return "Unknown shard...?", nil

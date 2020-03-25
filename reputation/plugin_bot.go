@@ -2,10 +2,12 @@ package reputation
 
 import (
 	"fmt"
-	"github.com/jonas747/yagpdb/bot/paginatedmessages"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/jonas747/yagpdb/analytics"
+	"github.com/jonas747/yagpdb/bot/paginatedmessages"
 
 	"github.com/jonas747/dcmd"
 	"github.com/jonas747/discordgo"
@@ -22,7 +24,7 @@ var _ bot.BotInitHandler = (*Plugin)(nil)
 var _ commands.CommandProvider = (*Plugin)(nil)
 
 func (p *Plugin) AddCommands() {
-	commands.AddRootCommands(cmds...)
+	commands.AddRootCommands(p, cmds...)
 }
 
 func (p *Plugin) BotInit() {
@@ -77,8 +79,10 @@ func handleMessageCreate(evt *eventsystem.EventData) {
 		return
 	}
 
-	content := fmt.Sprintf("Gave +1 %s to **%s**", conf.PointsName, who.Username)
-	common.BotSession.ChannelMessageSend(msg.ChannelID, common.EscapeSpecialMentions(content))
+	go analytics.RecordActiveUnit(msg.GuildID, &Plugin{}, "auto_add_rep")
+
+	content := fmt.Sprintf("Gave +1 %s to **%s**", conf.PointsName, who.Mention())
+	common.BotSession.ChannelMessageSend(msg.ChannelID, content)
 }
 
 var cmds = []*commands.YAGCommand{
@@ -127,7 +131,7 @@ var cmds = []*commands.YAGCommand{
 
 			member := commands.ContextMS(parsed.Context())
 			if !IsAdmin(parsed.GS, member, conf) {
-				return "You're not an reputation admin. (no manage servers perms and no rep admin role)", nil
+				return "You're not a reputation admin. (no manage server perms and no rep admin role)", nil
 			}
 
 			targetID := parsed.Args[0].Int64()
@@ -313,49 +317,46 @@ var cmds = []*commands.YAGCommand{
 	&commands.YAGCommand{
 		CmdCategory: commands.CategoryFun,
 		Name:        "TopRep",
-		Description: "Shows top 15 rep on the server",
+		Description: "Shows rep leaderboard on the server",
 		Arguments: []*dcmd.ArgDef{
 			{Name: "Page", Type: dcmd.Int, Default: 0},
 		},
-		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
-			intialPage := parsed.Args[0].Int()
+		RunFunc: paginatedmessages.PaginatedCommand(0, func(parsed *dcmd.Data, p *paginatedmessages.PaginatedMessage, page int) (*discordgo.MessageEmbed, error) {
+			offset := (page - 1) * 15
+			entries, err := TopUsers(parsed.GS.ID, offset, 15)
+			if err != nil {
+				return nil, err
+			}
 
-			_, err := paginatedmessages.CreatePaginatedMessage(parsed.GS.ID, parsed.CS.ID, intialPage, 0, func(p *paginatedmessages.PaginatedMessage, page int) (*discordgo.MessageEmbed, error) {
+			detailed, err := DetailedLeaderboardEntries(parsed.GS.ID, entries)
+			if err != nil {
+				return nil, err
+			}
 
-				offset := (page - 1) * 15
-				entries, err := TopUsers(parsed.GS.ID, offset, 15)
-				if err != nil {
-					return nil, err
+			if len(entries) < 1 && p != nil && p.LastResponse != nil { //Dont send No Results error on first execution
+				return nil, paginatedmessages.ErrNoResults
+			}
+
+			embed := &discordgo.MessageEmbed{
+				Title: "Reputation leaderboard",
+			}
+
+			leaderboardURL := web.BaseURL() + "/public/" + discordgo.StrID(parsed.GS.ID) + "/reputation/leaderboard"
+			out := "```\n# -- Points -- User\n"
+			for _, v := range detailed {
+				user := v.Username
+				if user == "" {
+					user = "unknown ID:" + strconv.FormatInt(v.UserID, 10)
 				}
+				out += fmt.Sprintf("#%02d: %6d - %s\n", v.Rank, v.Points, user)
+			}
+			out += "```\n" + "Full leaderboard: <" + leaderboardURL + ">"
 
-				detailed, err := DetailedLeaderboardEntries(parsed.GS.ID, entries)
-				if err != nil {
-					return nil, err
-				}
+			embed.Description = out
 
-				embed := &discordgo.MessageEmbed{
-					Title: "Reputation leaderboard",
-				}
+			return embed, nil
 
-				leaderboardURL := web.BaseURL() + "/public/" + discordgo.StrID(parsed.GS.ID) + "/reputation/leaderboard"
-				out := "```\n# -- Points -- User\n"
-				for _, v := range detailed {
-					user := v.Username
-					if user == "" {
-						user = "unknown ID:" + strconv.FormatInt(v.UserID, 10)
-					}
-					out += fmt.Sprintf("#%02d: %6d - %s\n", v.Rank, v.Points, user)
-				}
-				out += "```\n" + "Full leaderboard: <" + leaderboardURL + ">"
-
-				embed.Description = out
-
-				return embed, nil
-
-			})
-
-			return nil, err
-		},
+		}),
 	},
 }
 

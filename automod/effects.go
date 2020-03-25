@@ -2,10 +2,10 @@ package automod
 
 import (
 	"context"
-	"github.com/jonas747/discordgo"
 	"sync"
 	"time"
 
+	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dstate"
 	"github.com/jonas747/yagpdb/automod/models"
 	"github.com/jonas747/yagpdb/bot"
@@ -54,7 +54,7 @@ func (del *DeleteMessageEffect) Apply(ctxData *TriggeredRuleData, settings inter
 	go func(cID int64, messages []int64) {
 		// deleting messages too fast can sometimes make them still show in the discord client even after deleted
 		time.Sleep(500 * time.Millisecond)
-		bot.MessageDeleteQueue.DeleteMessages(cID, messages...)
+		bot.MessageDeleteQueue.DeleteMessages(ctxData.GS.ID, cID, messages...)
 	}(ctxData.Message.ChannelID, []int64{ctxData.Message.ID})
 
 	return nil
@@ -174,11 +174,11 @@ func (del *DeleteMessagesEffect) Apply(ctxData *TriggeredRuleData, settings inte
 		return nil
 	}
 
-	go func(cID int64, messages []int64) {
+	go func(cs *dstate.ChannelState, messages []int64) {
 		// deleting messages too fast can sometimes make them still show in the discord client even after deleted
 		time.Sleep(500 * time.Millisecond)
-		bot.MessageDeleteQueue.DeleteMessages(cID, messages...)
-	}(channel.ID, messages)
+		bot.MessageDeleteQueue.DeleteMessages(cs.Guild.ID, cs.ID, messages...)
+	}(channel, messages)
 
 	return nil
 }
@@ -287,12 +287,6 @@ func (kick *KickUserEffect) UserSettings() []*SettingDef {
 func (kick *KickUserEffect) Apply(ctxData *TriggeredRuleData, settings interface{}) error {
 	settingsCast := settings.(*KickUserEffectData)
 
-	var cID int64
-
-	if ctxData.CS != nil {
-		cID = ctxData.CS.ID
-	}
-
 	reason := "Automoderator:\n"
 	if settingsCast.CustomReason != "" {
 		reason += settingsCast.CustomReason
@@ -300,7 +294,7 @@ func (kick *KickUserEffect) Apply(ctxData *TriggeredRuleData, settings interface
 		reason += ctxData.ConstructReason(true)
 	}
 
-	err := moderation.KickUser(nil, ctxData.GS.ID, cID, common.BotUser, reason, ctxData.MS.DGoUser())
+	err := moderation.KickUser(nil, ctxData.GS.ID, ctxData.CS, ctxData.Message, common.BotUser, reason, ctxData.MS.DGoUser())
 	return err
 }
 
@@ -313,8 +307,9 @@ func (kick *KickUserEffect) MergeDuplicates(data []interface{}) interface{} {
 type BanUserEffect struct{}
 
 type BanUserEffectData struct {
-	Duration     int
-	CustomReason string `valid:",0,150,trimspace"`
+	Duration     	  int
+	CustomReason      string `valid:",0,150,trimspace"`
+	MessageDeleteDays int
 }
 
 func (ban *BanUserEffect) Kind() RulePartType {
@@ -348,16 +343,19 @@ func (ban *BanUserEffect) UserSettings() []*SettingDef {
 			Max:  150,
 			Kind: SettingTypeString,
 		},
+		&SettingDef{
+			Name:    "Number of days of messages to delete (0 to 7)",
+			Key:     "MessageDeleteDays",
+			Kind:    SettingTypeInt,
+			Min:     0,
+			Max:     7,
+			Default: 1,
+		},
 	}
 }
 
 func (ban *BanUserEffect) Apply(ctxData *TriggeredRuleData, settings interface{}) error {
 	settingsCast := settings.(*BanUserEffectData)
-
-	var cID int64
-	if ctxData.CS != nil {
-		cID = ctxData.CS.ID
-	}
 
 	reason := "Automoderator:\n"
 	if settingsCast.CustomReason != "" {
@@ -367,7 +365,7 @@ func (ban *BanUserEffect) Apply(ctxData *TriggeredRuleData, settings interface{}
 	}
 
 	duration := time.Duration(settingsCast.Duration) * time.Minute
-	err := moderation.BanUserWithDuration(nil, ctxData.GS.ID, cID, common.BotUser, reason, ctxData.MS.DGoUser(), duration)
+	err := moderation.BanUserWithDuration(nil, ctxData.GS.ID, ctxData.CS, ctxData.Message, common.BotUser, reason, ctxData.MS.DGoUser(), duration, settingsCast.MessageDeleteDays)
 	return err
 }
 
@@ -395,10 +393,9 @@ func (mute *MuteUserEffect) DataType() interface{} {
 func (mute *MuteUserEffect) UserSettings() []*SettingDef {
 	return []*SettingDef{
 		&SettingDef{
-			Name:    "Duration (minutes)",
+			Name:    "Duration (minutes, 0 for permanent)",
 			Key:     "Duration",
-			Min:     1,
-			Max:     10080, // 7 days
+			Min:  	 0,
 			Kind:    SettingTypeInt,
 			Default: 10,
 		},
@@ -423,11 +420,6 @@ func (mute *MuteUserEffect) Description() (description string) {
 func (mute *MuteUserEffect) Apply(ctxData *TriggeredRuleData, settings interface{}) error {
 	settingsCast := settings.(*MuteUserEffectData)
 
-	var cID int64
-	if ctxData.CS != nil {
-		cID = ctxData.CS.ID
-	}
-
 	reason := "Automoderator:\n"
 	if settingsCast.CustomReason != "" {
 		reason += settingsCast.CustomReason
@@ -435,7 +427,7 @@ func (mute *MuteUserEffect) Apply(ctxData *TriggeredRuleData, settings interface
 		reason += ctxData.ConstructReason(true)
 	}
 
-	err := moderation.MuteUnmuteUser(nil, true, ctxData.GS.ID, cID, common.BotUser, reason, ctxData.MS, settingsCast.Duration)
+	err := moderation.MuteUnmuteUser(nil, true, ctxData.GS.ID, ctxData.CS, ctxData.Message, common.BotUser, reason, ctxData.MS, settingsCast.Duration)
 	return err
 }
 
@@ -482,11 +474,6 @@ func (warn *WarnUserEffect) Description() (description string) {
 func (warn *WarnUserEffect) Apply(ctxData *TriggeredRuleData, settings interface{}) error {
 	settingsCast := settings.(*WarnUserEffectData)
 
-	var cID int64
-	if ctxData.CS != nil {
-		cID = ctxData.CS.ID
-	}
-
 	reason := "Automoderator:\n"
 	if settingsCast.CustomReason != "" {
 		reason += settingsCast.CustomReason
@@ -494,7 +481,7 @@ func (warn *WarnUserEffect) Apply(ctxData *TriggeredRuleData, settings interface
 		reason += ctxData.ConstructReason(true)
 	}
 
-	err := moderation.WarnUser(nil, ctxData.GS.ID, cID, common.BotUser, ctxData.MS.DGoUser(), reason)
+	err := moderation.WarnUser(nil, ctxData.GS.ID, ctxData.CS, ctxData.Message, common.BotUser, ctxData.MS.DGoUser(), reason)
 	return err
 }
 
@@ -652,7 +639,7 @@ func (gf *GiveRoleEffect) Apply(ctxData *TriggeredRuleData, settings interface{}
 	err := common.AddRoleDS(ctxData.MS, settingsCast.Role)
 	if err != nil {
 		if code, _ := common.DiscordError(err); code != 0 {
-			return nil // discord responded with a proper error, we know that shit didn't happen
+			return nil // discord responded with a proper error, we know that it didn't break
 		}
 
 		// discord was not the cause of the error, in some cases even if the gateway times out the action is performed so just in case, scehdule the role removal

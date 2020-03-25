@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"reflect"
 	"sort"
 	"strconv"
@@ -80,7 +81,6 @@ func BaseTemplateDataMiddleware(inner http.Handler) http.Handler {
 
 		// set up the base template data
 		baseData := map[string]interface{}{
-			"BotRunning":       botrest.BotIsRunning(),
 			"RequestURI":       r.RequestURI,
 			"StartedAtUnix":    StartedAt.Unix(),
 			"CurrentAd":        CurrentAd,
@@ -124,7 +124,7 @@ func SessionMiddleware(inner http.Handler) http.Handler {
 		token, err := AuthTokenFromB64(cookie.Value)
 		if err != nil {
 			if err != ErrNotLoggedIn {
-				// this could really only happen if the user messes with the session token, or some other bullshit happens (like bad ram i guess)
+				// this could really only happen if the user messes with the session token, or some other BS happens (like bad ram i guess)
 				CtxLogger(r.Context()).WithError(err).Error("invalid session")
 			}
 
@@ -150,7 +150,7 @@ func RequireSessionMiddleware(inner http.Handler) http.Handler {
 		// Check if a session is present
 		session := DiscordSessionFromContext(r.Context())
 		if session == nil {
-			WriteErrorResponse(w, r, "No session or session expired", http.StatusUnauthorized)
+			http.Redirect(w, r, "/login?goto="+url.QueryEscape(r.RequestURI), http.StatusTemporaryRedirect)
 			return
 		}
 
@@ -234,11 +234,11 @@ func setFullGuild(ctx context.Context, guildID int64) (context.Context, error) {
 func getGuild(guildID int64, ctx context.Context) (*discordgo.Guild, error) {
 	guild, err := botrest.GetGuild(guildID)
 	if err != nil {
-		CtxLogger(ctx).WithError(err).Error("[web] failed getting guild from bot, querying discord api")
+		CtxLogger(ctx).WithError(err).Warn("failed getting guild from bot, querying discord api")
 
 		guild, err = common.BotSession.Guild(guildID)
 		if err != nil {
-			CtxLogger(ctx).WithError(err).Error("[web] failed getting guild from discord fallback, nothing more we can do...")
+			CtxLogger(ctx).WithError(err).Warn("failed getting guild from discord fallback, nothing more we can do...")
 			return nil, err
 		}
 	}
@@ -257,7 +257,7 @@ func ActiveServerMW(inner http.Handler) http.Handler {
 		ctx := r.Context()
 		guildID, err := strconv.ParseInt(pat.Param(r, "server"), 10, 64)
 		if err != nil {
-			CtxLogger(ctx).WithError(err).Error("GuilID is not a number")
+			CtxLogger(ctx).WithError(err).Warn("GuilID is not a number")
 			return
 		}
 
@@ -318,7 +318,13 @@ func RequireActiveServer(inner http.Handler) http.Handler {
 func RequireServerAdminMiddleware(inner http.Handler) http.Handler {
 	mw := func(w http.ResponseWriter, r *http.Request) {
 		if !ContextIsAdmin(r.Context()) {
-			http.Redirect(w, r, "/?err=noaccess", http.StatusTemporaryRedirect)
+			if DiscordSessionFromContext(r.Context()) == nil {
+				// redirect them to log in and return here afterwards
+				http.Redirect(w, r, "/login?goto="+url.QueryEscape(r.RequestURI), http.StatusTemporaryRedirect)
+			} else {
+				// they didn't have access and were logged in
+				http.Redirect(w, r, "/?err=noaccess", http.StatusTemporaryRedirect)
+			}
 			return
 		}
 
@@ -347,7 +353,7 @@ func RequireGuildChannelsMiddleware(inner http.Handler) http.Handler {
 			return
 		}
 
-		// SORT THESE MOTHERFUCKERS
+		// Sort them
 		sort.Sort(dutil.Channels(channels))
 		guild.Channels = channels
 
@@ -466,7 +472,7 @@ func RenderHandler(inner CustomHandlerFunc, tmpl string) http.Handler {
 		if !alertsOnly {
 			err := Templates.ExecuteTemplate(w, tmpl, out)
 			if err != nil {
-				CtxLogger(r.Context()).WithError(err).Warn("Failed executing template")
+				CtxLogger(r.Context()).WithError(err).Error("Failed executing template")
 				return
 			}
 		} else {
@@ -479,7 +485,7 @@ func RenderHandler(inner CustomHandlerFunc, tmpl string) http.Handler {
 
 				encoded, err := json.Marshal(alerts)
 				if err != nil {
-					CtxLogger(r.Context()).WithError(err).Warn("Failed encoding alerts")
+					CtxLogger(r.Context()).WithError(err).Error("Failed encoding alerts")
 					return
 				}
 
@@ -793,42 +799,46 @@ func SetGuildMemberMiddleware(inner http.Handler) http.Handler {
 			return
 		}
 
+		ctx := r.Context()
+
 		userI := r.Context().Value(common.ContextKeyUser)
-		if userI == nil {
-			return
-		}
+		if userI != nil {
+			user := userI.(*discordgo.User)
+			results, err := botrest.GetMembers(guild.ID, user.ID)
 
-		user := userI.(*discordgo.User)
-		results, err := botrest.GetMembers(guild.ID, user.ID)
+			var m *discordgo.Member
+			if len(results) > 0 {
+				m = results[0]
+			}
 
-		var m *discordgo.Member
-		if len(results) > 0 {
-			m = results[0]
-		}
+			if err != nil || m == nil {
+				CtxLogger(r.Context()).WithError(err).Warn("failed retrieving member info from bot, falling back to discord api")
 
-		if err != nil || m == nil {
-			CtxLogger(r.Context()).WithError(err).Warn("failed retrieving member info from bot, falling back to discord api")
+				// fallback to discord api
+				m, err = common.BotSession.GuildMember(guild.ID, user.ID)
+				if err != nil {
+					CtxLogger(r.Context()).WithError(err).Warn("failed retrieving member info from discord api")
+				}
+			}
 
-			// fallback to discord api
-			m, err = common.BotSession.GuildMember(guild.ID, user.ID)
-			if err != nil {
-				CtxLogger(r.Context()).WithError(err).Warn("failed retrieving member info from discord api")
+			if m != nil {
+				// calculate permissions
+				perms := discordgo.MemberPermissions(guild, nil, m)
+
+				ctx = context.WithValue(r.Context(), common.ContextKeyUserMember, m)
+				ctx = context.WithValue(ctx, common.ContextKeyMemberPermissions, perms)
 			}
 		}
 
-		ctx := r.Context()
+		read, write := IsAdminRequest(ctx, r)
+		ctx = SetContextTemplateData(ctx, map[string]interface{}{"IsAdmin": read || write})
+		ctx = context.WithValue(ctx, common.ContextKeyIsAdmin, read || write)
 
-		if m != nil {
-			// calculate permissions
-			perms := discordgo.MemberPermissions(guild, nil, m)
-
-			ctx = context.WithValue(r.Context(), common.ContextKeyUserMember, m)
-			ctx = context.WithValue(ctx, common.ContextKeyMemberPermissions, perms)
+		if read && !write {
+			var tmpl TemplateData
+			ctx, tmpl = GetCreateTemplateData(ctx)
+			tmpl.AddAlerts(WarningAlert("In read only mode, you can not change any settings."))
 		}
-
-		isAdmin := IsAdminRequest(ctx, r)
-		ctx = SetContextTemplateData(ctx, map[string]interface{}{"IsAdmin": isAdmin})
-		ctx = context.WithValue(ctx, common.ContextKeyIsAdmin, isAdmin)
 
 		r = r.WithContext(ctx)
 	}
@@ -862,4 +872,19 @@ func SkipStaticMW(maybeSkip func(http.Handler) http.Handler, alwaysRunSuffixes .
 
 		return http.HandlerFunc(mw)
 	}
+}
+
+// RequireBotOwnerMW requires the user to be logged in and that they're a bot owner
+func RequireBotOwnerMW(inner http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user := r.Context().Value(common.ContextKeyUser); user != nil {
+			cast := user.(*discordgo.User)
+			if common.IsOwner(cast.ID) {
+				inner.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		w.WriteHeader(http.StatusUnauthorized)
+	})
 }

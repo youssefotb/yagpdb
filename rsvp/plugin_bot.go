@@ -4,6 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
 	"github.com/jonas747/dcmd"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dstate"
@@ -17,10 +23,6 @@ import (
 	"github.com/jonas747/yagpdb/timezonecompanion"
 	"github.com/volatiletech/sqlboiler/boil"
 	"github.com/volatiletech/sqlboiler/queries/qm"
-	"strconv"
-	"strings"
-	"sync"
-	"time"
 )
 
 var _ bot.BotInitHandler = (*Plugin)(nil)
@@ -47,7 +49,8 @@ func (p *Plugin) AddCommands() {
 		CmdCategory: catEvents,
 		Name:        "Create",
 		Aliases:     []string{"new", "make"},
-		Description: "Creates a event, You will be led through an interactive setup",
+		Description: "Creates an event, You will be led through an interactive setup",
+		Plugin:      p,
 		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
 
 			count, err := models.RSVPSessions(models.RSVPSessionWhere.GuildID.EQ(parsed.GS.ID)).CountG(parsed.Context())
@@ -95,6 +98,7 @@ func (p *Plugin) AddCommands() {
 		CmdCategory:         catEvents,
 		Name:                "Edit",
 		Description:         "Edits an event",
+		Plugin:              p,
 		RequireDiscordPerms: []int64{discordgo.PermissionManageServer, discordgo.PermissionManageMessages},
 		Arguments: []*dcmd.ArgDef{
 			&dcmd.ArgDef{Name: "ID", Type: dcmd.Int},
@@ -173,6 +177,7 @@ func (p *Plugin) AddCommands() {
 		Aliases:             []string{"ls"},
 		Description:         "Lists all events in this server",
 		RequireDiscordPerms: []int64{discordgo.PermissionManageServer, discordgo.PermissionManageMessages},
+		Plugin:              p,
 		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
 			events, err := models.RSVPSessions(models.RSVPSessionWhere.GuildID.EQ(parsed.GS.ID), qm.OrderBy("starts_at asc")).AllG(parsed.Context())
 			if err != nil {
@@ -200,9 +205,10 @@ func (p *Plugin) AddCommands() {
 		CmdCategory:         catEvents,
 		Name:                "Delete",
 		Aliases:             []string{"rm", "del"},
-		Description:         "Deletes a event, specify the event ID of the event you wanna delete",
+		Description:         "Deletes an event, specify the event ID of the event you wanna delete",
 		RequireDiscordPerms: []int64{discordgo.PermissionManageServer, discordgo.PermissionManageMessages},
 		RequiredArgs:        1,
+		Plugin:              p,
 		Arguments: []*dcmd.ArgDef{
 			&dcmd.ArgDef{Name: "ID", Type: dcmd.Int},
 		},
@@ -236,6 +242,7 @@ func (p *Plugin) AddCommands() {
 		Aliases:             []string{"cancelsetup"},
 		Description:         "Force cancels the current setup session in this channel",
 		RequireDiscordPerms: []int64{discordgo.PermissionManageServer},
+		Plugin:              p,
 		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
 
 			p.setupSessionsMU.Lock()
@@ -293,7 +300,7 @@ func UpdateEventEmbed(m *models.RSVPSession) error {
 
 	fetchedMembers, _ := bot.GetMembers(m.GuildID, usersToFetch...)
 
-	author := findUserWithNickname(fetchedMembers, m.AuthorID)
+	author := findUser(fetchedMembers, m.AuthorID)
 
 	embed := &discordgo.MessageEmbed{
 		Author: &discordgo.MessageEmbedAuthor{
@@ -345,32 +352,63 @@ func UpdateEventEmbed(m *models.RSVPSession) error {
 
 	addedParticipants := 0
 	numWaitingList := 0
+
+	numParticipantsShown := 0
+	numWaitingListShown := 0
+
+	waitingListHitMax := false
+	participantsHitMax := false
 	for _, v := range participants {
 		if v.JoinState != int16(ParticipantStateJoining) && v.JoinState != int16(ParticipantStateWaitlist) {
 			continue
 		}
 
-		user := findUserWithNickname(fetchedMembers, v.UserID)
+		user := findUser(fetchedMembers, v.UserID)
 		if (addedParticipants >= m.MaxParticipants && m.MaxParticipants > 0) || v.JoinState == int16(ParticipantStateWaitlist) {
-			// we hit the max limit so add them to the waiting list instead
-			waitingListField.Value += user.Username + "#" + user.Discriminator + "\n"
+			// On the waiting list
+			if !waitingListHitMax {
+
+				// we hit the max limit so add them to the waiting list instead
+				toAdd := user.Username + "#" + user.Discriminator + "\n"
+				if utf8.RuneCountInString(toAdd)+utf8.RuneCountInString(waitingListField.Value) >= 990 {
+					waitingListHitMax = true
+				} else {
+					waitingListField.Value += toAdd
+					numWaitingListShown++
+				}
+			}
+
 			numWaitingList++
 			continue
 		}
 
-		participantsEmbed.Value += user.Username + "#" + user.Discriminator + "\n"
+		if !participantsHitMax {
+			toAdd := user.Username + "#" + user.Discriminator + "\n"
+			if utf8.RuneCountInString(toAdd)+utf8.RuneCountInString(participantsEmbed.Value) > 990 {
+				participantsHitMax = true
+			} else {
+				participantsEmbed.Value += toAdd
+				numParticipantsShown++
+			}
+		}
+
 		addedParticipants++
 	}
 
+	// Finalize the participants field
 	if participantsEmbed.Value == "```\n" {
 		participantsEmbed.Value += "None"
+	} else if participantsHitMax {
+		participantsEmbed.Value += fmt.Sprintf("+ %d users", addedParticipants-numParticipantsShown)
 	}
 	participantsEmbed.Value += "```"
 
+	// Finalize the waiting list field
 	waitingListField.Name += " (" + strconv.Itoa(numWaitingList) + ")"
-
 	if waitingListField.Value == "```\n" {
 		waitingListField.Value += "None"
+	} else if waitingListHitMax {
+		waitingListField.Value += fmt.Sprintf("+ %d users", numWaitingList-numWaitingListShown)
 	}
 	waitingListField.Value += "```"
 
@@ -390,14 +428,11 @@ func UpdateEventEmbed(m *models.RSVPSession) error {
 	return err
 }
 
-func findUserWithNickname(members []*dstate.MemberState, target int64) *discordgo.User {
+func findUser(members []*dstate.MemberState, target int64) *discordgo.User {
 
 	for _, v := range members {
 		if v.ID == target {
 			dgoUser := v.DGoUser()
-			if v.Nick != "" {
-				dgoUser.Username = v.Nick
-			}
 			return dgoUser
 		}
 	}
@@ -416,23 +451,33 @@ func ParticipantField(state ParticipantState, participants []*models.RSVPPartici
 	}
 
 	count := 0
+	countShown := 0
+	reachedMax := false
+
 	for _, v := range participants {
-		user := findUserWithNickname(users, v.UserID)
+		user := findUser(users, v.UserID)
 
 		if v.JoinState == int16(state) {
-			field.Value += user.Username + "#" + user.Discriminator + "\n"
-			count++
-
-			if count >= 100 {
-				break
+			if !reachedMax {
+				toAdd := user.Username + "#" + user.Discriminator + "\n"
+				if utf8.RuneCountInString(toAdd)+utf8.RuneCountInString(field.Value) >= 25 {
+					reachedMax = true
+				} else {
+					field.Value += toAdd
+					countShown++
+				}
 			}
+			count++
 		}
 	}
 
 	if count == 0 {
-		field.Value += "No-one\n"
+		field.Value += "None\n"
 	} else {
 		field.Name += " (" + strconv.Itoa(count) + ")"
+		if reachedMax {
+			field.Value += fmt.Sprintf("+ %d users", count-countShown)
+		}
 	}
 
 	field.Value += "```"

@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"html/template"
 	"strconv"
 	"strings"
@@ -126,7 +127,20 @@ func tmplRoleDropdown(roles []*discordgo.Role, highestBotRole *discordgo.Role, a
 // Same as tmplRoleDropdown but supports multiple selections
 func tmplRoleDropdownMutli(roles []*discordgo.Role, highestBotRole *discordgo.Role, selections []int64) template.HTML {
 
-	output := ""
+	var builder strings.Builder
+
+	// show deleted roles
+OUTER:
+	for _, sr := range selections {
+		for _, gr := range roles {
+			if sr == gr.ID {
+				continue OUTER
+			}
+		}
+
+		builder.WriteString(fmt.Sprintf(`<option value="0" selected>Deleted role: %d</option>\n`, sr))
+	}
+
 	for k, role := range roles {
 		// Skip the everyone role
 		if k == len(roles)-1 {
@@ -139,33 +153,33 @@ func tmplRoleDropdownMutli(roles []*discordgo.Role, highestBotRole *discordgo.Ro
 		}
 
 		optIsSelected := false
-		output += `<option value="` + discordgo.StrID(role.ID) + `"`
+		builder.WriteString(`<option value="` + discordgo.StrID(role.ID) + `"`)
 		for _, selected := range selections {
 			if selected == role.ID {
-				output += " selected"
+				builder.WriteString(" selected")
 				optIsSelected = true
 			}
 		}
 
 		if role.Color != 0 {
 			hexColor := strconv.FormatInt(int64(role.Color), 16)
-			output += " data-color=\"#" + hexColor + "\""
+			builder.WriteString(" data-color=\"#" + hexColor + "\"")
 		}
 
 		optName := template.HTMLEscapeString(role.Name)
 		if highestBotRole != nil {
 			if dutil.IsRoleAbove(role, highestBotRole) || highestBotRole.ID == role.ID {
 				if !optIsSelected {
-					output += " disabled"
+					builder.WriteString(" disabled")
 				}
 
 				optName += " (role is above bot)"
 			}
 		}
-		output += ">" + optName + "</option>\n"
+		builder.WriteString(">" + optName + "</option>\n")
 	}
 
-	return template.HTML(output)
+	return template.HTML(builder.String())
 }
 
 func tmplChannelOpts(channelTypes []discordgo.ChannelType, optionPrefix string) interface{} {
@@ -258,4 +272,32 @@ func containsChannelType(s []discordgo.ChannelType, t discordgo.ChannelType) boo
 	}
 
 	return false
+}
+
+func tmplCheckbox(name, id, description string, checked bool, extraInputAttrs ...string) template.HTML {
+	// 	const code = `<div class="checkbox-custom checkbox-primary">
+	// 	<input type="checkbox" checked="" id="checkboxExample2">
+	// 	<label for="checkboxExample2">Checkbox Primary</label>
+	// </div>`
+
+	// <input class="tgl tgl-flat" id="cb4" type="checkbox"/>
+	// <label class="tgl-btn" for="cb4"></label>
+
+	var builder strings.Builder
+	builder.WriteString(`<div class="form-group d-flex align-items-center">`)
+	builder.WriteString(`<input type="checkbox" class="tgl tgl-flat"`)
+	builder.WriteString(` name="` + name + `" id="` + id + `"`)
+
+	if checked {
+		builder.WriteString(" checked")
+	}
+	if len(extraInputAttrs) > 0 {
+		builder.WriteString(" " + strings.Join(extraInputAttrs, " "))
+	}
+	builder.WriteString(`><label for="` + id + `" class="tgl-btn mb-2"></label>`)
+	// builder.WriteString(`><div class="switch"></div>`)
+	builder.WriteString(`<span class="ml-2 mb-2">` + description + `</span></div>`)
+	// builder.WriteString(`</div>`)
+
+	return template.HTML(builder.String())
 }

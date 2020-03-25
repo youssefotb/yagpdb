@@ -3,10 +3,12 @@ package logs
 import (
 	"context"
 	"database/sql"
-	"emperror.dev/errors"
 	"fmt"
-	"github.com/jonas747/yagpdb/bot/paginatedmessages"
+	"os"
 	"time"
+
+	"emperror.dev/errors"
+	"github.com/jonas747/yagpdb/bot/paginatedmessages"
 
 	"github.com/jonas747/dcmd"
 	"github.com/jonas747/discordgo"
@@ -24,7 +26,7 @@ var _ bot.BotInitHandler = (*Plugin)(nil)
 var _ commands.CommandProvider = (*Plugin)(nil)
 
 func (p *Plugin) AddCommands() {
-	commands.AddRootCommands(cmdLogs, cmdWhois, cmdNicknames, cmdUsernames, cmdMigrate)
+	commands.AddRootCommands(p, cmdLogs, cmdWhois, cmdNicknames, cmdUsernames, cmdMigrate)
 }
 
 func (p *Plugin) BotInit() {
@@ -80,6 +82,11 @@ var cmdWhois = &commands.YAGCommand{
 		}
 
 		member := commands.ContextMS(parsed.Context())
+		memberCPY := parsed.GS.MemberCopy(true, member.ID)
+		if memberCPY != nil {
+			member = memberCPY
+		}
+
 		if parsed.Args[0].Value != nil {
 			member = parsed.Args[0].Value.(*dstate.MemberState)
 		}
@@ -101,7 +108,7 @@ var cmdWhois = &commands.YAGCommand{
 		}
 
 		if joinedAtDurStr == "" {
-			joinedAtDurStr = "Lesss than an hour ago"
+			joinedAtDurStr = "Less than an hour ago"
 		}
 
 		t := bot.SnowflakeToTime(member.ID)
@@ -109,6 +116,19 @@ var cmdWhois = &commands.YAGCommand{
 		if createdDurStr == "" {
 			createdDurStr = "Less than an hour ago"
 		}
+
+		var memberStatus string
+		state := [4]string{"Playing", "Streaming", "Listening", "Watching"}
+		if !member.PresenceSet || member.PresenceGame == nil {
+			memberStatus = fmt.Sprintf("Has no active status or is invisible/offline.")
+		} else {
+			if member.PresenceGame.Type == 4 {
+				memberStatus = fmt.Sprintf("%s: %s", member.PresenceGame.Name, member.PresenceGame.State)
+			} else {
+				memberStatus = fmt.Sprintf("%s: %s", state[member.PresenceGame.Type], member.PresenceGame.Name)
+			}
+		}
+
 		embed := &discordgo.MessageEmbed{
 			Title: fmt.Sprintf("%s#%04d%s", member.Username, member.Discriminator, nick),
 			Fields: []*discordgo.MessageEmbedField{
@@ -123,7 +143,7 @@ var cmdWhois = &commands.YAGCommand{
 					Inline: true,
 				},
 				&discordgo.MessageEmbedField{
-					Name:   "Account created",
+					Name:   "Account Created",
 					Value:  t.UTC().Format(time.RFC822),
 					Inline: true,
 				},
@@ -133,12 +153,17 @@ var cmdWhois = &commands.YAGCommand{
 					Inline: true,
 				},
 				&discordgo.MessageEmbedField{
-					Name:   "Joined server at",
+					Name:   "Joined Server At",
 					Value:  joinedAtStr,
 					Inline: true,
 				}, &discordgo.MessageEmbedField{
-					Name:   "Join server Age",
+					Name:   "Join Server Age",
 					Value:  joinedAtDurStr,
+					Inline: true,
+				},
+				&discordgo.MessageEmbedField{
+					Name:   "Status",
+					Value:  memberStatus,
 					Inline: true,
 				},
 			},
@@ -203,12 +228,11 @@ var cmdWhois = &commands.YAGCommand{
 }
 
 var cmdUsernames = &commands.YAGCommand{
-	CmdCategory:     commands.CategoryTool,
-	Name:            "Usernames",
-	Description:     "Shows past usernames of a user.",
-	LongDescription: "Only shows up to the last 25 usernames.",
-	Aliases:         []string{"unames", "un"},
-	RunInDM:         true,
+	CmdCategory: commands.CategoryTool,
+	Name:        "Usernames",
+	Description: "Shows past usernames of a user.",
+	Aliases:     []string{"unames", "un"},
+	RunInDM:     true,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "User", Type: dcmd.User},
 	},
@@ -264,13 +288,11 @@ var cmdUsernames = &commands.YAGCommand{
 }
 
 var cmdNicknames = &commands.YAGCommand{
-	CmdCategory:     commands.CategoryTool,
-	Name:            "Nicknames",
-	Description:     "Shows past nicknames of a user.",
-	LongDescription: "Only shows up to the last 25 nicknames.",
-
-	Aliases: []string{"nn"},
-	RunInDM: false,
+	CmdCategory: commands.CategoryTool,
+	Name:        "Nicknames",
+	Description: "Shows past nicknames of a user.",
+	Aliases:     []string{"nn"},
+	RunInDM:     false,
 	Arguments: []*dcmd.ArgDef{
 		{Name: "User", Type: dcmd.User},
 	},
@@ -383,6 +405,10 @@ func HandleQueueEvt(evt *eventsystem.EventData) {
 }
 
 func queueEvt(evt interface{}) {
+	if os.Getenv("YAGPDB_LOGS_DISABLE_USERNAME_TRACKING") != "" {
+		return
+	}
+
 	select {
 	case evtChan <- evt:
 		return
@@ -811,7 +837,7 @@ func GetConfigCached(exec boil.ContextExecutor, gID int64) (*models.GuildLogging
 		return GetConfig(exec, context.Background(), gID)
 	}
 
-	v, err := gs.UserCacheFetch(true, CacheKeyConfig, func() (interface{}, error) {
+	v, err := gs.UserCacheFetch(CacheKeyConfig, func() (interface{}, error) {
 		conf, err := GetConfig(exec, context.Background(), gID)
 		return conf, err
 	})

@@ -1,23 +1,19 @@
 package botrest
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
-	"net/http/pprof"
+	"os"
 	"sort"
 	"strconv"
-	"sync"
 	"time"
 
 	"emperror.dev/errors"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dstate"
 	"github.com/jonas747/dutil"
-	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/common"
-	"github.com/jonas747/yagpdb/common/config"
+	"github.com/jonas747/yagpdb/common/internalapi"
 	"goji.io"
 	"goji.io/pat"
 )
@@ -27,20 +23,17 @@ func RegisterPlugin() {
 }
 
 var (
-	_ bot.BotInitHandler    = (*Plugin)(nil)
-	_ bot.BotStopperHandler = (*Plugin)(nil)
+	// _ bot.BotInitHandler = (*Plugin)(nil)
+	_ internalapi.InternalAPIPlugin = (*Plugin)(nil)
 )
 
-var confBotrestListenAddr = config.RegisterOption("yagpdb.botrest.listen_address", "botrest listening address, it will use the first port available above 5010", "127.0.0.1")
 var serverLogger = common.GetFixedPrefixLogger("botrest_server")
 
-type BotRestPlugin interface {
-	InitBotRestServer(mux *goji.Mux)
-}
+// type BotRestPlugin interface {
+// 	InitBotRestServer(mux *goji.Mux)
+// }
 
 type Plugin struct {
-	srv   *http.Server
-	srvMU sync.Mutex
 }
 
 func (p *Plugin) PluginInfo() *common.PluginInfo {
@@ -51,9 +44,13 @@ func (p *Plugin) PluginInfo() *common.PluginInfo {
 	}
 }
 
-func (p *Plugin) BotInit() {
+func (p *Plugin) InitInternalAPIRoutes(muxer *goji.Mux) {
+	if !bot.Enabled {
+		// bot only routes
+		return
+	}
 
-	muxer := goji.NewMux()
+	// muxer := goji.NewMux()
 
 	muxer.HandleFunc(pat.Get("/:guild/guild"), HandleGuild)
 	muxer.HandleFunc(pat.Get("/:guild/botmember"), HandleBotMember)
@@ -61,145 +58,16 @@ func (p *Plugin) BotInit() {
 	muxer.HandleFunc(pat.Get("/:guild/membercolors"), HandleGetMemberColors)
 	muxer.HandleFunc(pat.Get("/:guild/onlinecount"), HandleGetOnlineCount)
 	muxer.HandleFunc(pat.Get("/:guild/channelperms/:channel"), HandleChannelPermissions)
-	muxer.HandleFunc(pat.Get("/gw_status"), HandleGWStatus)
+	muxer.HandleFunc(pat.Get("/node_status"), HandleNodeStatus)
+	muxer.HandleFunc(pat.Get("/shard_sessions"), HandleGetShardSessions)
 	muxer.HandleFunc(pat.Post("/shard/:shard/reconnect"), HandleReconnectShard)
-	muxer.HandleFunc(pat.Get("/ping"), HandlePing)
 
-	// Debug stuff
-	muxer.HandleFunc(pat.Get("/debug/pprof/*"), pprof.Index)
-	muxer.HandleFunc(pat.Get("/debug/pprof"), pprof.Index)
-	muxer.HandleFunc(pat.Get("/debug2/pproff/cmdline"), pprof.Cmdline)
-	muxer.HandleFunc(pat.Get("/debug2/pproff/profile"), pprof.Profile)
-	muxer.HandleFunc(pat.Get("/debug2/pproff/symbol"), pprof.Symbol)
-	muxer.HandleFunc(pat.Get("/debug2/pproff/trace"), pprof.Trace)
+	// for _, p := range common.Plugins {
+	// 	if botRestPlugin, ok := p.(BotRestPlugin); ok {
+	// 		botRestPlugin.InitBotRestServer(muxer)
+	// 	}
+	// }
 
-	for _, p := range common.Plugins {
-		if botRestPlugin, ok := p.(BotRestPlugin); ok {
-			botRestPlugin.InitBotRestServer(muxer)
-		}
-	}
-
-	p.srv = &http.Server{
-		Handler: muxer,
-	}
-
-	currentPort := 5010
-
-	go func() {
-		// listen address excluding port
-		listenAddr := confBotrestListenAddr.GetString()
-		if listenAddr == "" {
-			// default to safe loopback interface
-			listenAddr = "127.0.0.1"
-		}
-
-		for {
-			address := listenAddr + ":" + strconv.Itoa(currentPort)
-
-			serverLogger.Println("starting botrest on ", address)
-
-			p.srvMU.Lock()
-			p.srv.Addr = address
-			p.srvMU.Unlock()
-
-			err := p.srv.ListenAndServe()
-			if err != nil {
-				// Shutdown was called for graceful shutdown
-				if err == http.ErrServerClosed {
-					serverLogger.Info("server closed, shutting down...")
-					return
-				}
-
-				// Retry with a higher port until we succeed
-				serverLogger.WithError(err).Error("failed starting botrest http server on ", address, " trying again on next port")
-				currentPort++
-				time.Sleep(time.Millisecond)
-				continue
-			}
-
-			serverLogger.Println("botrest returned without any error")
-			break
-		}
-	}()
-
-	// Wait for the server address to stop changing
-	go func() {
-		lastAddr := ""
-		lastChange := time.Now()
-		for {
-			p.srvMU.Lock()
-			addr := p.srv.Addr
-			p.srvMU.Unlock()
-
-			if lastAddr != addr {
-				lastAddr = addr
-				time.Sleep(time.Second)
-				lastChange = time.Now()
-				continue
-			}
-
-			if time.Since(lastChange) > time.Second*5 {
-				// found avaiable port
-				go p.mapper(lastAddr)
-				return
-			}
-
-			time.Sleep(time.Second)
-		}
-	}()
-}
-
-func (p *Plugin) mapper(address string) {
-	t := time.NewTicker(time.Second * 10)
-	for {
-		p.mapAddressToShards(address)
-		<-t.C
-	}
-}
-
-func (p *Plugin) mapAddressToShards(address string) {
-
-	processShards := bot.GetProcessShards()
-
-	// serverLogger.Debug("mapping ", address, " to current process shards")
-	for _, shard := range processShards {
-		err := common.RedisPool.Do(retryableredis.Cmd(nil, "SET", RedisKeyShardAddressMapping(shard), address))
-		if err != nil {
-			serverLogger.WithError(err).Error("failed mapping botrest")
-		}
-	}
-
-	if bot.UsingOrchestrator {
-		err := common.RedisPool.Do(retryableredis.Cmd(nil, "SET", RedisKeyNodeAddressMapping(bot.NodeConn.GetIDLock()), address))
-		if err != nil {
-			serverLogger.WithError(err).Error("failed mapping node")
-		}
-	}
-}
-
-func (p *Plugin) StopBot(wg *sync.WaitGroup) {
-	p.srv.Shutdown(context.TODO())
-	wg.Done()
-}
-
-func ServeJson(w http.ResponseWriter, r *http.Request, data interface{}) {
-	err := json.NewEncoder(w).Encode(data)
-	if err != nil {
-		serverLogger.WithError(err).Error("Failed sending json")
-	}
-}
-
-// Returns true if an error occured
-func ServerError(w http.ResponseWriter, r *http.Request, err error) bool {
-	if err == nil {
-		return false
-	}
-
-	encodedErr, _ := json.Marshal(err.Error())
-
-	w.WriteHeader(http.StatusInternalServerError)
-	w.Write(encodedErr)
-	return true
 }
 
 func HandleGuild(w http.ResponseWriter, r *http.Request) {
@@ -207,13 +75,13 @@ func HandleGuild(w http.ResponseWriter, r *http.Request) {
 
 	guild := bot.State.Guild(true, gId)
 	if guild == nil {
-		ServerError(w, r, errors.New("Guild not found"))
+		internalapi.ServerError(w, r, errors.New("Guild not found"))
 		return
 	}
 
 	gCopy := guild.DeepCopy(true, true, false, true)
 
-	ServeJson(w, r, gCopy)
+	internalapi.ServeJson(w, r, gCopy)
 }
 
 func HandleBotMember(w http.ResponseWriter, r *http.Request) {
@@ -221,17 +89,17 @@ func HandleBotMember(w http.ResponseWriter, r *http.Request) {
 
 	guild := bot.State.Guild(true, gId)
 	if guild == nil {
-		ServerError(w, r, errors.New("Guild not found"))
+		internalapi.ServerError(w, r, errors.New("Guild not found"))
 		return
 	}
 
 	member := guild.MemberDGoCopy(true, common.BotUser.ID)
 	if member == nil {
-		ServerError(w, r, errors.New("Bot Member not found"))
+		internalapi.ServerError(w, r, errors.New("Bot Member not found"))
 		return
 	}
 
-	ServeJson(w, r, member)
+	internalapi.ServeJson(w, r, member)
 }
 
 func HandleGetMembers(w http.ResponseWriter, r *http.Request) {
@@ -239,18 +107,18 @@ func HandleGetMembers(w http.ResponseWriter, r *http.Request) {
 	uIDs, ok := r.URL.Query()["users"]
 
 	if !ok || len(uIDs) < 1 {
-		ServerError(w, r, errors.New("No id's provided"))
+		internalapi.ServerError(w, r, errors.New("No id's provided"))
 		return
 	}
 
 	if len(uIDs) > 100 {
-		ServerError(w, r, errors.New("Too many ids provided"))
+		internalapi.ServerError(w, r, errors.New("Too many ids provided"))
 		return
 	}
 
 	guild := bot.State.Guild(true, gId)
 	if guild == nil {
-		ServerError(w, r, errors.New("Guild not found"))
+		internalapi.ServerError(w, r, errors.New("Guild not found"))
 		return
 	}
 
@@ -266,7 +134,7 @@ func HandleGetMembers(w http.ResponseWriter, r *http.Request) {
 		members[i] = v.DGoCopy()
 	}
 
-	ServeJson(w, r, members)
+	internalapi.ServeJson(w, r, members)
 }
 
 func HandleGetMemberColors(w http.ResponseWriter, r *http.Request) {
@@ -274,18 +142,18 @@ func HandleGetMemberColors(w http.ResponseWriter, r *http.Request) {
 	uIDs, ok := r.URL.Query()["users"]
 
 	if !ok || len(uIDs) < 1 {
-		ServerError(w, r, errors.New("No id's provided"))
+		internalapi.ServerError(w, r, errors.New("No id's provided"))
 		return
 	}
 
 	if len(uIDs) > 100 {
-		ServerError(w, r, errors.New("Too many ids provided"))
+		internalapi.ServerError(w, r, errors.New("Too many ids provided"))
 		return
 	}
 
 	guild := bot.State.Guild(true, gId)
 	if guild == nil {
-		ServerError(w, r, errors.New("Guild not found"))
+		internalapi.ServerError(w, r, errors.New("Guild not found"))
 		return
 	}
 
@@ -321,7 +189,7 @@ func HandleGetMemberColors(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ServeJson(w, r, colors)
+	internalapi.ServeJson(w, r, colors)
 }
 
 func HandleGetOnlineCount(w http.ResponseWriter, r *http.Request) {
@@ -329,7 +197,7 @@ func HandleGetOnlineCount(w http.ResponseWriter, r *http.Request) {
 
 	guild := bot.State.Guild(true, gId)
 	if guild == nil {
-		ServerError(w, r, errors.New("Guild not found"))
+		internalapi.ServerError(w, r, errors.New("Guild not found"))
 		return
 	}
 
@@ -342,7 +210,7 @@ func HandleGetOnlineCount(w http.ResponseWriter, r *http.Request) {
 	}
 	guild.RUnlock()
 
-	ServeJson(w, r, count)
+	internalapi.ServeJson(w, r, count)
 }
 
 func HandleChannelPermissions(w http.ResponseWriter, r *http.Request) {
@@ -351,22 +219,22 @@ func HandleChannelPermissions(w http.ResponseWriter, r *http.Request) {
 
 	guild := bot.State.Guild(true, gId)
 	if guild == nil {
-		ServerError(w, r, errors.New("Guild not found"))
+		internalapi.ServerError(w, r, errors.New("Guild not found"))
 		return
 	}
 
 	perms, err := guild.MemberPermissions(true, cId, common.BotUser.ID)
 
 	if err != nil {
-		ServerError(w, r, errors.WithMessage(err, "Error calculating perms"))
+		internalapi.ServerError(w, r, errors.WithMessage(err, "Error calculating perms"))
 		return
 	}
 
-	ServeJson(w, r, perms)
+	internalapi.ServeJson(w, r, perms)
 }
 
 func HandlePing(w http.ResponseWriter, r *http.Request) {
-	ServeJson(w, r, "pong")
+	internalapi.ServeJson(w, r, "pong")
 }
 
 type ShardStatus struct {
@@ -378,17 +246,21 @@ type ShardStatus struct {
 
 	LastHeartbeatSend time.Time `json:"last_heartbeat_send"`
 	LastHeartbeatAck  time.Time `json:"last_heartbeat_ack"`
+
+	NumGuilds         int
+	UnavailableGuilds int
 }
 
-func HandleGWStatus(w http.ResponseWriter, r *http.Request) {
+func HandleNodeStatus(w http.ResponseWriter, r *http.Request) {
 
 	totalEventStats, periodEventStats := bot.EventLogger.GetStats()
 
 	numShards := bot.ShardManager.GetNumShards()
 	result := make([]*ShardStatus, 0, numShards)
 
-	processShards := bot.GetProcessShards()
+	processShards := bot.ReadyTracker.GetProcessShards()
 
+	// get general shard stats
 	for _, shardID := range processShards {
 		shard := bot.ShardManager.Sessions[shardID]
 
@@ -417,7 +289,57 @@ func HandleGWStatus(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	ServeJson(w, r, result)
+	// Guild guild stats
+	gSlice := bot.State.GuildsSlice(true)
+	for _, g := range gSlice {
+		shardID := bot.GuildShardID(int64(numShards), g.ID)
+		available := g.IsAvailable(true)
+		for _, v := range result {
+			if v.ShardID == shardID {
+				v.NumGuilds++
+				if !available {
+					v.UnavailableGuilds++
+				}
+				break
+			}
+		}
+	}
+
+	hostname, _ := os.Hostname()
+
+	internalapi.ServeJson(w, r, &NodeStatus{
+		Host:   hostname,
+		Shards: result,
+		ID:     common.NodeID,
+		Uptime: time.Since(bot.Started),
+	})
+}
+
+type shardSessionInfo struct {
+	ShardID   int
+	SessionID string
+}
+
+func HandleGetShardSessions(w http.ResponseWriter, r *http.Request) {
+
+	// numShards := bot.ShardManager.GetNumShards()
+	// result := make([]*ShardStatus, 0, numShards)
+
+	processShards := bot.ReadyTracker.GetProcessShards()
+
+	result := make([]*shardSessionInfo, 0)
+
+	// get general shard stats
+	for _, shardID := range processShards {
+		shard := bot.ShardManager.Sessions[shardID]
+		sessionID, _ := shard.GatewayManager.GetSessionInfo()
+		result = append(result, &shardSessionInfo{
+			ShardID:   shardID,
+			SessionID: sessionID,
+		})
+	}
+
+	internalapi.ServeJson(w, r, result)
 }
 
 func HandleReconnectShard(w http.ResponseWriter, r *http.Request) {
@@ -425,24 +347,24 @@ func HandleReconnectShard(w http.ResponseWriter, r *http.Request) {
 	forceReidentify := r.FormValue("reidentify") == "1"
 	if sID == "*" {
 		go RestartAll(forceReidentify)
-		ServeJson(w, r, "ok")
+		internalapi.ServeJson(w, r, "ok")
 		return
 	}
 
 	parsed, _ := strconv.ParseInt(sID, 10, 32)
 	shardcount := bot.ShardManager.GetNumShards()
 	if parsed < 0 || int(parsed) >= shardcount {
-		ServerError(w, r, errors.New("Unknown shard"))
+		internalapi.ServerError(w, r, errors.New("Unknown shard"))
 		return
 	}
 
 	err := bot.ShardManager.Sessions[parsed].GatewayManager.Reconnect(forceReidentify)
 	if err != nil {
-		ServerError(w, r, errors.WithMessage(err, "Reconnect"))
+		internalapi.ServerError(w, r, errors.WithMessage(err, "Reconnect"))
 		return
 	}
 
-	ServeJson(w, r, "ok")
+	internalapi.ServeJson(w, r, "ok")
 }
 
 func RestartAll(reidentify bool) {

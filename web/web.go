@@ -10,9 +10,7 @@ import (
 	"time"
 
 	"github.com/NYTimes/gziphandler"
-	"github.com/golang/crypto/acme/autocert"
 	"github.com/jonas747/discordgo"
-	"github.com/jonas747/yagpdb/bot/botrest"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/config"
 	"github.com/jonas747/yagpdb/common/patreon"
@@ -21,6 +19,7 @@ import (
 	"github.com/natefinch/lumberjack"
 	"goji.io"
 	"goji.io/pat"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 var (
@@ -55,11 +54,14 @@ var (
 	confAnnouncementsChannel       = config.RegisterOption("yagpdb.announcements_channel", "Channel to pull announcements from and display on the control panel homepage", 0)
 	confReverseProxyClientIPHeader = config.RegisterOption("yagpdb.web.reverse_proxy_client_ip_header", "If were behind a reverse proxy, this is the header field with the real ip that the proxy passes along", "")
 
-	confAdPath    = config.RegisterOption("yagpdb.ad.img_path", "The ad image ", "")
-	confAdLinkurl = config.RegisterOption("yagpdb.ad.link", "Link to follow when clicking on the ad", "")
-	confAdWidth   = config.RegisterOption("yagpdb.ad.w", "Ad width", 0)
-	confAdHeight  = config.RegisterOption("yagpdb.ad.h", "Ad Height", 0)
-	ConfAdVideos  = config.RegisterOption("yagpdb.ad.video_paths", "Comma seperated list of video paths in different formats", "")
+	confAdPath       = config.RegisterOption("yagpdb.ad.img_path", "The ad image ", "")
+	confAdLinkurl    = config.RegisterOption("yagpdb.ad.link", "Link to follow when clicking on the ad", "")
+	confAdWidth      = config.RegisterOption("yagpdb.ad.w", "Ad width", 0)
+	confAdHeight     = config.RegisterOption("yagpdb.ad.h", "Ad Height", 0)
+	ConfAdVideos     = config.RegisterOption("yagpdb.ad.video_paths", "Comma seperated list of video paths in different formats", "")
+	confDemoServerID = config.RegisterOption("yagpdb.web.demo_server_id", "Server ID for live demo links", 0)
+
+	ConfAdsTxt = config.RegisterOption("yagpdb.ads.ads_txt", "Path to the ads.txt file for monetization using ad networks", "")
 
 	confDisableRequestLogging = config.RegisterOption("yagpdb.disable_request_logging", "Disable logging of http requests to web server", false)
 )
@@ -82,6 +84,7 @@ func init() {
 		"mTemplate":        mTemplate,
 		"hasPerm":          hasPerm,
 		"formatTime":       prettyTime,
+		"checkbox":         tmplCheckbox,
 		"roleOptions":      tmplRoleDropdown,
 		"roleOptionsMulti": tmplRoleDropdownMutli,
 
@@ -103,9 +106,16 @@ func init() {
 }
 
 func loadTemplates() {
-	Templates = template.Must(Templates.ParseFiles("templates/index.html", "templates/cp_main.html",
+
+	coreTemplates := []string{
+		"templates/index.html", "templates/cp_main.html",
 		"templates/cp_nav.html", "templates/cp_selectserver.html", "templates/cp_logs.html",
-		"templates/status.html", "templates/cp_server_home.html", "templates/cp_core_settings.html"))
+		"templates/status.html", "templates/cp_server_home.html", "templates/cp_core_settings.html",
+	}
+
+	for _, v := range coreTemplates {
+		LoadHTMLTemplate(v, v)
+	}
 }
 
 func BaseURL() string {
@@ -117,6 +127,8 @@ func BaseURL() string {
 }
 
 func Run() {
+	common.ServiceTracker.RegisterService(common.ServiceTypeFrontend, "Webserver", "", nil)
+
 	common.RegisterPlugin(&ControlPanelPlugin{})
 
 	loadTemplates()
@@ -137,7 +149,6 @@ func Run() {
 	mux := setupRoutes()
 
 	// Start monitoring the bot
-	go botrest.RunPinger()
 	go pollCommandsRan()
 
 	blogChannel := confAnnouncementsChannel.GetInt()
@@ -145,13 +156,13 @@ func Run() {
 		go discordblog.RunPoller(common.BotSession, int64(blogChannel), time.Minute)
 	}
 
-	LoadAd()
+	loadAd()
 
 	logger.Info("Running webservers")
 	runServers(mux)
 }
 
-func LoadAd() {
+func loadAd() {
 	path := confAdPath.GetString()
 	linkurl := confAdLinkurl.GetString()
 
@@ -274,8 +285,9 @@ func setupRoutes() *goji.Mux {
 	// Server selection has its own handler
 	RootMux.Handle(pat.Get("/manage"), RenderHandler(HandleSelectServer, "cp_selectserver"))
 	RootMux.Handle(pat.Get("/manage/"), RenderHandler(HandleSelectServer, "cp_selectserver"))
-	RootMux.Handle(pat.Get("/status"), ControllerHandler(HandleStatus, "cp_status"))
-	RootMux.Handle(pat.Get("/status/"), ControllerHandler(HandleStatus, "cp_status"))
+	RootMux.Handle(pat.Get("/status"), ControllerHandler(HandleStatusHTML, "cp_status"))
+	RootMux.Handle(pat.Get("/status/"), ControllerHandler(HandleStatusHTML, "cp_status"))
+	RootMux.Handle(pat.Get("/status.json"), APIHandler(HandleStatusJSON))
 	RootMux.Handle(pat.Post("/shard/:shard/reconnect"), ControllerHandler(HandleReconnectShard, "cp_status"))
 	RootMux.Handle(pat.Post("/shard/:shard/reconnect/"), ControllerHandler(HandleReconnectShard, "cp_status"))
 
@@ -284,7 +296,6 @@ func setupRoutes() *goji.Mux {
 
 	// Server control panel, requires you to be an admin for the server (owner or have server management role)
 	CPMux = goji.SubMux()
-	CPMux.Use(RequireSessionMiddleware)
 	CPMux.Use(ActiveServerMW)
 	CPMux.Use(RequireActiveServer)
 	CPMux.Use(LoadCoreConfigMiddleware)
@@ -321,6 +332,18 @@ func setupRoutes() *goji.Mux {
 		}
 	}
 
+	AddSidebarItem(SidebarCategoryCore, &SidebarItem{
+		Name: "Core",
+		URL:  "core",
+		Icon: "fas fa-cog",
+	})
+
+	AddSidebarItem(SidebarCategoryCore, &SidebarItem{
+		Name: "Control panel logs",
+		URL:  "cplogs",
+		Icon: "fas fa-database",
+	})
+
 	for _, plugin := range common.Plugins {
 		if webPlugin, ok := plugin.(Plugin); ok {
 			webPlugin.InitWeb()
@@ -330,6 +353,8 @@ func setupRoutes() *goji.Mux {
 
 	return RootMux
 }
+
+var StaticFileserverDir = "."
 
 func setupRootMux() {
 	mux := goji.NewMux()
@@ -345,8 +370,9 @@ func setupRootMux() {
 	}
 
 	// Setup fileserver
-	mux.Handle(pat.Get("/static/*"), http.FileServer(http.Dir(".")))
+	mux.Handle(pat.Get("/static/*"), http.FileServer(http.Dir(StaticFileserverDir)))
 	mux.Handle(pat.Get("/robots.txt"), http.HandlerFunc(handleRobotsTXT))
+	mux.Handle(pat.Get("/ads.txt"), http.HandlerFunc(handleAdsTXT))
 
 	// General middleware
 	mux.Use(SkipStaticMW(gziphandler.GzipHandler, ".css", ".js", ".map"))
@@ -380,6 +406,9 @@ func LoadHTMLTemplate(pathTesting, pathProd string) {
 	path := pathProd
 	if common.Testing {
 		path = pathTesting
+		if TestingTemplatePathResolver != nil {
+			path = TestingTemplatePathResolver(path)
+		}
 	}
 
 	Templates = template.Must(Templates.ParseFiles(path))
@@ -390,11 +419,14 @@ const (
 	SidebarCategoryFeeds    = "Feeds"
 	SidebarCategoryTools    = "Tools"
 	SidebarCategoryFun      = "Fun"
+	SidebarCategoryCore     = "Core"
 )
 
 type SidebarItem struct {
 	Name string
 	URL  string
+	Icon string
+	New  bool
 }
 
 var sideBarItems = make(map[string][]*SidebarItem)
@@ -402,3 +434,6 @@ var sideBarItems = make(map[string][]*SidebarItem)
 func AddSidebarItem(category string, sItem *SidebarItem) {
 	sideBarItems[category] = append(sideBarItems[category], sItem)
 }
+
+// Resolves the path to template files in testing mode
+var TestingTemplatePathResolver func(in string) string

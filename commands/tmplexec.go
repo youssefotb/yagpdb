@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jonas747/yagpdb/bot/paginatedmessages"
+
 	"emperror.dev/errors"
 	"github.com/jonas747/dcmd"
 	"github.com/jonas747/discordgo"
@@ -71,12 +73,16 @@ func tmplUserArg(tmplCtx *templates.Context) interface{} {
 	}
 }
 
-type cmdExecFunc func(cmd string, args ...interface{}) (string, error)
+type cmdExecFunc func(cmd string, args ...interface{}) (interface{}, error)
 
 // Returns 2 functions to execute commands in user or bot context with limited about of commands executed
 func TmplExecCmdFuncs(ctx *templates.Context, maxExec int, dryRun bool) (userCtxCommandExec cmdExecFunc, botCtxCommandExec cmdExecFunc) {
-	execUser := func(cmd string, args ...interface{}) (string, error) {
-		mc := &discordgo.MessageCreate{ctx.Msg}
+	execUser := func(cmd string, args ...interface{}) (interface{}, error) {
+		messageCopy := *ctx.Msg
+		if ctx.CurrentFrame.CS != nil { //Check if CS is not a nil pointer
+			messageCopy.ChannelID = ctx.CurrentFrame.CS.ID
+		}
+		mc := &discordgo.MessageCreate{&messageCopy}
 		if maxExec < 1 {
 			return "", errors.New("Max number of commands executed in custom command")
 		}
@@ -84,13 +90,16 @@ func TmplExecCmdFuncs(ctx *templates.Context, maxExec int, dryRun bool) (userCtx
 		return execCmd(ctx, dryRun, mc, cmd, args...)
 	}
 
-	execBot := func(cmd string, args ...interface{}) (string, error) {
+	execBot := func(cmd string, args ...interface{}) (interface{}, error) {
 
 		botUserCopy := *common.BotUser
 		botUserCopy.Username = "YAGPDB (cc: " + ctx.Msg.Author.Username + "#" + ctx.Msg.Author.Discriminator + ")"
 
 		messageCopy := *ctx.Msg
 		messageCopy.Author = &botUserCopy
+		if ctx.CurrentFrame.CS != nil { //Check if CS is not a nil pointer
+			messageCopy.ChannelID = ctx.CurrentFrame.CS.ID
+		}
 
 		mc := &discordgo.MessageCreate{&messageCopy}
 		if maxExec < 1 {
@@ -103,8 +112,8 @@ func TmplExecCmdFuncs(ctx *templates.Context, maxExec int, dryRun bool) (userCtx
 	return execUser, execBot
 }
 
-func execCmd(ctx *templates.Context, dryRun bool, m *discordgo.MessageCreate, cmd string, args ...interface{}) (string, error) {
-	ctxMember, err := bot.GetMember(ctx.GS.ID, m.Author.ID)
+func execCmd(tmplCtx *templates.Context, dryRun bool, m *discordgo.MessageCreate, cmd string, args ...interface{}) (interface{}, error) {
+	ctxMember, err := bot.GetMember(tmplCtx.GS.ID, m.Author.ID)
 	if err != nil {
 		return "error retrieving member", err
 	}
@@ -175,7 +184,8 @@ func execCmd(ctx *templates.Context, dryRun bool, m *discordgo.MessageCreate, cm
 		return "", errors.WithMessage(err, "tmplExecCmd")
 	}
 	data.MsgStrippedPrefix = fakeMsg.Content
-	data = data.WithContext(context.WithValue(data.Context(), CtxKeyMS, ctxMember))
+	ctx := context.WithValue(data.Context(), CtxKeyMS, ctxMember)
+	data = data.WithContext(context.WithValue(ctx, paginatedmessages.CtxKeyNoPagination, true))
 
 	foundCmd, foundContainer, rest := CommandSystem.Root.AbsFindCommandWithRest(cmdLine)
 	if foundCmd == nil {
@@ -205,17 +215,28 @@ func execCmd(ctx *templates.Context, dryRun bool, m *discordgo.MessageCreate, cm
 
 	for i := range data.ContainerChain {
 		if i == len(data.ContainerChain)-1 {
-			// skip middlewares in original container to bypass cooldowns and shit
+			// skip middlewares in original container to bypass cooldowns and stuff
 			continue
 		}
 		runFunc = data.ContainerChain[len(data.ContainerChain)-1-i].BuildMiddlewareChain(runFunc, foundCmd)
 	}
-	// foundCmd.Trigger.
+
+	// Check guild scope cooldown
+	cd, err := cast.GuildScopeCooldownLeft(data.ContainerChain, tmplCtx.GS.ID)
+	if err != nil {
+		return "", errors.WithStackIf(err)
+	}
+
+	if cd > 0 {
+		return "", errors.NewPlain("this command is on guild scope cooldown")
+	}
 
 	resp, err := runFunc(data)
 	if err != nil {
 		return "", errors.WithMessage(err, "exec/execadmin, run")
 	}
+
+	cast.SetCooldownGuild(data.ContainerChain, tmplCtx.GS.ID)
 
 	switch v := resp.(type) {
 	case error:
@@ -223,11 +244,9 @@ func execCmd(ctx *templates.Context, dryRun bool, m *discordgo.MessageCreate, cm
 	case string:
 		return v, nil
 	case *discordgo.MessageEmbed:
-		ctx.EmebdsToSend = append(ctx.EmebdsToSend, v)
-		return "", nil
+		return v, nil
 	case []*discordgo.MessageEmbed:
-		ctx.EmebdsToSend = append(ctx.EmebdsToSend, v...)
-		return "", nil
+		return v, nil
 	}
 
 	return "", nil

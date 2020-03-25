@@ -38,12 +38,12 @@ func (pf *PostForm) ToDBModel() *models.SoundboardSound {
 }
 
 func (p *Plugin) InitWeb() {
-	tmplPath := "templates/plugins/soundboard.html"
-	if common.Testing {
-		tmplPath = "../../soundboard/assets/soundboard.html"
-	}
-
-	web.Templates = template.Must(web.Templates.ParseFiles(tmplPath))
+	web.LoadHTMLTemplate("../../soundboard/assets/soundboard.html", "templates/plugins/soundboard.html")
+	web.AddSidebarItem(web.SidebarCategoryFun, &web.SidebarItem{
+		Name: "Soundboard",
+		URL:  "soundboard/",
+		Icon: "fas fa-border-all",
+	})
 
 	cpMux := goji.SubMux()
 

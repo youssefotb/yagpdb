@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"github.com/jonas747/discordgo"
+	"github.com/jonas747/dstate"
+	"github.com/jonas747/yagpdb/analytics"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/bot/eventsystem"
 	"github.com/jonas747/yagpdb/commands"
@@ -65,13 +67,12 @@ func HandleMessageUpdate(evt *eventsystem.EventData) {
 }
 
 func CheckMessage(m *discordgo.Message) bool {
-
-	if m.Author == nil || m.Author.ID == common.BotUser.ID {
-		return false // Pls no panicerinos or banerinos self
+	if !bot.IsNormalUserMessage(m) {
+		return false
 	}
 
-	if m.Author.Bot || m.GuildID == 0 {
-		return false
+	if m.Author.ID == common.BotUser.ID || m.Author.Bot || m.GuildID == 0 {
+		return false // Pls no panicerinos or banerinos self
 	}
 
 	cs := bot.State.Channel(true, m.ChannelID)
@@ -94,11 +95,7 @@ func CheckMessage(m *discordgo.Message) bool {
 		return false
 	}
 
-	member, err := bot.GetMember(cs.Guild.ID, m.Author.ID)
-	if err != nil {
-		logger.WithError(err).WithField("guild", cs.Guild.ID).Warn("Member not found in state, automod ignoring")
-		return false
-	}
+	member := dstate.MSFromDGoMember(cs.Guild, m.Member)
 
 	locked := true
 	cs.Owner.RLock()
@@ -115,12 +112,14 @@ func CheckMessage(m *discordgo.Message) bool {
 
 	rules := []Rule{config.Spam, config.Invite, config.Mention, config.Links, config.Words, config.Sites}
 
+	didCheck := false
+
 	// We gonna need to have this locked while we check
 	for _, r := range rules {
 		if r.ShouldIgnore(m, member) {
 			continue
 		}
-
+		didCheck = true
 		d, punishment, msg, err := r.Check(m, cs)
 		if d {
 			del = true
@@ -144,8 +143,13 @@ func CheckMessage(m *discordgo.Message) bool {
 	}
 
 	if !del {
+		if didCheck {
+			go analytics.RecordActiveUnit(cs.Guild.ID, &Plugin{}, "checked")
+		}
 		return false
 	}
+
+	go analytics.RecordActiveUnit(cs.Guild.ID, &Plugin{}, "rule_triggered")
 
 	if punishMsg != "" {
 		// Strip last newline
@@ -158,13 +162,13 @@ func CheckMessage(m *discordgo.Message) bool {
 	go func() {
 		switch highestPunish {
 		case PunishNone:
-			err = moderation.WarnUser(nil, cs.Guild.ID, cs.ID, common.BotUser, member.DGoUser(), "Automoderator: "+punishMsg)
+			err = moderation.WarnUser(nil, cs.Guild.ID, cs, m, common.BotUser, member.DGoUser(), "Automoderator: "+punishMsg)
 		case PunishMute:
-			err = moderation.MuteUnmuteUser(nil, true, cs.Guild.ID, cs.ID, common.BotUser, "Automoderator: "+punishMsg, member, muteDuration)
+			err = moderation.MuteUnmuteUser(nil, true, cs.Guild.ID, cs, m, common.BotUser, "Automoderator: "+punishMsg, member, muteDuration)
 		case PunishKick:
-			err = moderation.KickUser(nil, cs.Guild.ID, cs.ID, common.BotUser, "Automoderator: "+punishMsg, member.DGoUser())
+			err = moderation.KickUser(nil, cs.Guild.ID, cs, m, common.BotUser, "Automoderator: "+punishMsg, member.DGoUser())
 		case PunishBan:
-			err = moderation.BanUser(nil, cs.Guild.ID, cs.ID, common.BotUser, "Automoderator: "+punishMsg, member.DGoUser())
+			err = moderation.BanUser(nil, cs.Guild.ID, cs, m, common.BotUser, "Automoderator: "+punishMsg, member.DGoUser())
 		}
 
 		// Execute the punishment before removing the message to make sure it's included in logs

@@ -15,8 +15,8 @@ import (
 	"github.com/jonas747/yagpdb/commands"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/pubsub"
+	"github.com/jonas747/yagpdb/serverstats/messagestatscollector"
 	"github.com/jonas747/yagpdb/web"
-	"github.com/sirupsen/logrus"
 )
 
 func MarkGuildAsToBeChecked(guildID int64) {
@@ -24,11 +24,14 @@ func MarkGuildAsToBeChecked(guildID int64) {
 }
 
 var (
-	_ bot.BotInitHandler       = (*Plugin)(nil)
-	_ commands.CommandProvider = (*Plugin)(nil)
+	_                 bot.BotInitHandler       = (*Plugin)(nil)
+	_                 commands.CommandProvider = (*Plugin)(nil)
+	msgStatsCollector *messagestatscollector.Collector
 )
 
 func (p *Plugin) BotInit() {
+	msgStatsCollector = messagestatscollector.NewCollector(logger, time.Minute)
+
 	eventsystem.AddHandlerAsyncLastLegacy(p, HandleMemberAdd, eventsystem.EventGuildMemberAdd)
 	eventsystem.AddHandlerAsyncLastLegacy(p, HandleMemberRemove, eventsystem.EventGuildMemberRemove)
 	eventsystem.AddHandlerAsyncLast(p, eventsystem.RequireCSMW(HandleMessageCreate), eventsystem.EventMessageCreate)
@@ -37,7 +40,7 @@ func (p *Plugin) BotInit() {
 	pubsub.AddHandler("server_stats_invalidate_cache", func(evt *pubsub.Event) {
 		gs := bot.State.Guild(true, evt.TargetGuildInt)
 		if gs != nil {
-			gs.UserCacheDel(true, CacheKeyConfig)
+			gs.UserCacheDel(CacheKeyConfig)
 		}
 	}, nil)
 
@@ -45,7 +48,7 @@ func (p *Plugin) BotInit() {
 }
 
 func (p *Plugin) AddCommands() {
-	commands.AddRootCommands(&commands.YAGCommand{
+	commands.AddRootCommands(p, &commands.YAGCommand{
 		CustomEnabled: true,
 		CmdCategory:   commands.CategoryTool,
 		Cooldown:      5,
@@ -61,7 +64,7 @@ func (p *Plugin) AddCommands() {
 				return fmt.Sprintf("Stats are set to private on this server, this can be changed in the control panel on <https://%s>", common.ConfHost.GetString()), nil
 			}
 
-			stats, err := RetrieveDailyStats(data.GS.ID)
+			stats, err := RetrieveDailyStats(time.Now(), data.GS.ID)
 			if err != nil {
 				return nil, errors.WithMessage(err, "retrievefullstats")
 			}
@@ -86,7 +89,6 @@ func (p *Plugin) AddCommands() {
 			return embed, nil
 		},
 	})
-
 }
 
 func HandleGuildCreate(evt *eventsystem.EventData) {
@@ -105,9 +107,6 @@ func HandleMemberAdd(evt *eventsystem.EventData) {
 	gs.RUnlock()
 
 	SetUpdateMemberStatsPeriod(g.GuildID, 1, mc)
-
-	common.LogIgnoreError(common.RedisPool.Do(retryableredis.FlatCmd(nil, "SADD", RedisKeyGuildMembersChanged, g.GuildID)),
-		"[serverstats] failed marking guildmembers changed", logrus.Fields{"guild": g.GuildID})
 }
 
 func HandleMemberRemove(evt *eventsystem.EventData) {
@@ -120,9 +119,6 @@ func HandleMemberRemove(evt *eventsystem.EventData) {
 	gs.RUnlock()
 
 	SetUpdateMemberStatsPeriod(g.GuildID, -1, mc)
-
-	common.LogIgnoreError(common.RedisPool.Do(retryableredis.FlatCmd(nil, "SADD", RedisKeyGuildMembersChanged, g.GuildID)),
-		"[serverstats] failed marking guildmembers changed", logrus.Fields{"guild": g.GuildID})
 }
 
 func SetUpdateMemberStatsPeriod(guildID int64, memberIncr int, numMembers int) {
@@ -137,13 +133,13 @@ func SetUpdateMemberStatsPeriod(guildID int64, memberIncr int, numMembers int) {
 	// round to current hour
 	t := RoundHour(time.Now())
 
-	_, err := common.PQ.Exec(`INSERT INTO server_stats_member_periods  (guild_id, created_at, num_members, joins, leaves, max_online)
-VALUES ($1, $2, $3, $4, $5, 0)
-ON CONFLICT (guild_id, created_at)
+	_, err := common.PQ.Exec(`INSERT INTO server_stats_hourly_periods_misc  (guild_id, t, num_members, joins, leaves, max_online, max_voice)
+VALUES ($1, $2, $3, $4, $5, 0, 0)
+ON CONFLICT (guild_id, t)
 DO UPDATE SET 
-joins = server_stats_member_periods.joins + $4, 
-leaves = server_stats_member_periods.leaves + $5, 
-num_members = server_stats_member_periods.num_members + $6;`, guildID, t, numMembers, joins, leaves, memberIncr) // update clause vars
+joins = server_stats_hourly_periods_misc.joins + $4, 
+leaves = server_stats_hourly_periods_misc.leaves + $5, 
+num_members = server_stats_hourly_periods_misc.num_members + $6;`, guildID, t, numMembers, joins, leaves, memberIncr)
 
 	if err != nil {
 		logger.WithError(err).Error("failed setting member stats period")
@@ -169,14 +165,7 @@ func HandleMessageCreate(evt *eventsystem.EventData) (retry bool, err error) {
 		return false, nil
 	}
 
-	val := channel.StrID() + ":" + discordgo.StrID(m.ID) + ":" + discordgo.StrID(m.Author.ID)
-	err = common.RedisPool.Do(retryableredis.FlatCmd(nil, "ZADD", "guild_stats_msg_channel_day:"+channel.Guild.StrID(), time.Now().Unix(), val))
-	if err != nil {
-		return true, errors.WithStackIf(err)
-	}
-
-	MarkGuildAsToBeChecked(channel.Guild.ID)
-
+	msgStatsCollector.MsgEvtChan <- m.Message
 	return false, nil
 }
 
@@ -187,7 +176,7 @@ const (
 )
 
 func BotCachedFetchGuildConfig(ctx context.Context, gs *dstate.GuildState) (*ServerStatsConfig, error) {
-	v, err := gs.UserCacheFetch(true, CacheKeyConfig, func() (interface{}, error) {
+	v, err := gs.UserCacheFetch(CacheKeyConfig, func() (interface{}, error) {
 		return GetConfig(ctx, gs.ID)
 	})
 
@@ -199,6 +188,7 @@ func BotCachedFetchGuildConfig(ctx context.Context, gs *dstate.GuildState) (*Ser
 }
 
 func (p *Plugin) runOnlineUpdater() {
+	time.Sleep(time.Minute * 10) // relieve startup preasure
 
 	ticker := time.NewTicker(time.Second * 10)
 	state := bot.State
@@ -247,11 +237,11 @@ func (p *Plugin) runOnlineUpdater() {
 		}
 
 		for g, counts := range totalCounts {
-			_, err := tx.Exec(`INSERT INTO server_stats_member_periods  (guild_id, created_at, num_members, joins, leaves, max_online)
-VALUES ($1, $2, $3, 0, 0, $4)
-ON CONFLICT (guild_id, created_at)
+			_, err := tx.Exec(`INSERT INTO server_stats_hourly_periods_misc  (guild_id, t, num_members, joins, leaves, max_online, max_voice)
+VALUES ($1, $2, $3, 0, 0, $4, 0)
+ON CONFLICT (guild_id, t)
 DO UPDATE SET 
-max_online = GREATEST (server_stats_member_periods.max_online, $4)
+max_online = GREATEST (server_stats_hourly_periods_misc.max_online, $4)
 `, g, t, counts[1], counts[0]) // update clause vars
 
 			if err != nil {

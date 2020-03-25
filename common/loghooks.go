@@ -1,19 +1,21 @@
 package common
 
 import (
-	"bytes"
-	"math"
 	"net/http"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/jonas747/discordgo"
 	"github.com/sirupsen/logrus"
 )
+
+func init() {
+	discordgo.Logger = discordLogger
+	discordgo.GatewayLogger = DiscordGatewayLogger
+}
 
 type ContextHook struct{}
 
@@ -46,52 +48,72 @@ func (hook ContextHook) Fire(entry *logrus.Entry) error {
 type STDLogProxy struct{}
 
 func (p *STDLogProxy) Write(b []byte) (n int, err error) {
-
-	// Check to see if this is from discordgo
-	isDiscord := bytes.HasPrefix(b, []byte("[DG"))
-	discordLogLevel := 2
-	if isDiscord && len(b) > 4 {
-
-		parsedLevel, err := strconv.Atoi(string(b[3]))
-		if err == nil {
-			discordLogLevel = parsedLevel
-		}
-	}
-
 	n = len(b)
 
-	data := make(logrus.Fields)
+	pc := make([]uintptr, 3)
+	runtime.Callers(4, pc)
 
-	if !isDiscord {
-		pc := make([]uintptr, 3)
-		runtime.Callers(4, pc)
+	fu := runtime.FuncForPC(pc[0] - 1)
+	name := fu.Name()
+	file, line := fu.FileLine(pc[0] - 1)
 
-		fu := runtime.FuncForPC(pc[0] - 1)
-		name := fu.Name()
-		file, line := fu.FileLine(pc[0] - 1)
-
-		data["stck"] = filepath.Base(name) + ":" + filepath.Base(file) + ":" + strconv.Itoa(line)
-	} else {
-		data["stck"] = "" // prevent upstream from adding it
-	}
+	stack := filepath.Base(name) + ":" + filepath.Base(file) + ":" + strconv.Itoa(line)
 
 	logLine := string(b)
 	if strings.HasSuffix(logLine, "\n") {
 		logLine = strings.TrimSuffix(logLine, "\n")
 	}
 
-	f := logrus.WithFields(data)
-
-	switch discordLogLevel {
-	case 0:
-		f.Error(logLine)
-	case 1:
-		f.Warn(logLine)
-	default:
-		f.Info(logLine)
+	l := logrus.WithField("stck", stack)
+	if strings.Contains(strings.ToLower(logLine), "error") {
+		l.Error(logLine)
+	} else {
+		l.Info(logLine)
 	}
 
 	return
+}
+
+func discordLogger(msgL, caller int, format string, a ...interface{}) {
+	pc := make([]uintptr, 3)
+	runtime.Callers(caller+1, pc)
+	fu := runtime.FuncForPC(pc[0] - 1)
+	name := fu.Name()
+	file, line := fu.FileLine(pc[0] - 1)
+
+	stack := filepath.Base(name) + ":" + filepath.Base(file) + ":" + strconv.Itoa(line)
+
+	f := logrus.WithField("stck", stack)
+
+	switch msgL {
+	case 0:
+		f.Errorf("[DG] "+format, a...)
+	case 1:
+		f.Warnf("[DG] "+format, a...)
+	default:
+		f.Infof("[DG] "+format, a...)
+	}
+}
+
+func DiscordGatewayLogger(shardID int, connectionID int, msgL int, msgf string, args ...interface{}) {
+	pc := make([]uintptr, 3)
+	runtime.Callers(3, pc)
+	fu := runtime.FuncForPC(pc[0] - 1)
+	name := fu.Name()
+	file, line := fu.FileLine(pc[0] - 1)
+
+	stack := filepath.Base(name) + ":" + filepath.Base(file) + ":" + strconv.Itoa(line)
+
+	f := logrus.WithField("stck", stack).WithField("shard", shardID).WithField("connid", connectionID)
+
+	switch msgL {
+	case 0:
+		f.Errorf("[GATEWAY] "+msgf, args...)
+	case 1:
+		f.Warnf("[GATEWAY] "+msgf, args...)
+	default:
+		f.Infof("[GATEWAY] "+msgf, args...)
+	}
 }
 
 type GORMLogger struct {
@@ -119,6 +141,12 @@ var numberRemover = strings.NewReplacer(
 
 func (t *LoggingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 
+	bucketI := request.Context().Value(discordgo.CtxKeyRatelimitBucket)
+	var rlBucket *discordgo.Bucket
+	if bucketI != nil {
+		rlBucket = bucketI.(*discordgo.Bucket)
+	}
+
 	inner := t.Inner
 	if inner == nil {
 		inner = http.DefaultTransport
@@ -132,14 +160,17 @@ func (t *LoggingTransport) RoundTrip(request *http.Request) (*http.Response, err
 		code = resp.StatusCode
 	}
 
-	floored := int(math.Floor(float64(code) / 100))
-
 	since := time.Since(started).Seconds() * 1000
 	go func() {
-		path := numberRemover.Replace(request.URL.Path)
+		path := request.URL.Path
+		if rlBucket != nil {
+			path = rlBucket.Key
+		}
+
+		path = numberRemover.Replace(path)
 
 		if Statsd != nil {
-			Statsd.Incr("discord.num_requsts", []string{"method:" + request.Method, "resp_code:" + strconv.Itoa(floored), "path:" + request.Method + "-" + path}, 1)
+			Statsd.Incr("discord.num_requests", []string{"method:" + request.Method, "resp_code:" + strconv.Itoa(code), "path:" + request.Method + "-" + path}, 1)
 			Statsd.Gauge("discord.http_latency", since, nil, 1)
 			if code == 429 {
 				Statsd.Incr("discord.requests.429", []string{"method:" + request.Method, "path:" + request.Method + "-" + path}, 1)
@@ -157,86 +188,23 @@ func (t *LoggingTransport) RoundTrip(request *http.Request) (*http.Response, err
 	return resp, err
 }
 
-type PrefixedLogFormatter struct {
-	Inner  logrus.Formatter
-	Prefix string
-}
-
-func (p *PrefixedLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	entryCop := *entry
-	entryCop.Message = p.Prefix + entryCop.Message
-
-	return p.Inner.Format(&entryCop)
-}
-
-// We pretty the logging up a bit here, adding a prefix for plugins
-var loggers = []*logrus.Logger{logrus.StandardLogger()}
-var loggersmu sync.Mutex
-
 func AddLogHook(hook logrus.Hook) {
-	loggersmu.Lock()
-
-	for _, v := range loggers {
-		v.AddHook(hook)
-	}
-
-	loggersmu.Unlock()
+	logrus.AddHook(hook)
 }
 
 func SetLoggingLevel(level logrus.Level) {
-	loggersmu.Lock()
-	defer loggersmu.Unlock()
-
-	for _, v := range loggers {
-		v.SetLevel(level)
-	}
-
 	logrus.SetLevel(level)
 }
 
 func SetLogFormatter(formatter logrus.Formatter) {
-	loggersmu.Lock()
-
-	for _, v := range loggers {
-		if cast, ok := v.Formatter.(*PrefixedLogFormatter); ok {
-			cast.Inner = formatter
-		} else {
-			v.SetFormatter(formatter)
-		}
-	}
-
-	loggersmu.Unlock()
+	logrus.SetFormatter(formatter)
 }
 
-func GetPluginLogger(plugin Plugin) *logrus.Logger {
+func GetPluginLogger(plugin Plugin) *logrus.Entry {
 	info := plugin.PluginInfo()
-	return GetFixedPrefixLogger(info.SysName)
+	return logrus.WithField("p", info.SysName)
 }
 
-func GetFixedPrefixLogger(prefix string) *logrus.Logger {
-
-	l := logrus.New()
-	stdLogger := logrus.StandardLogger()
-	cop := make(logrus.LevelHooks)
-	for k, v := range stdLogger.Hooks {
-		cop[k] = make([]logrus.Hook, len(v))
-		copy(cop[k], v)
-	}
-
-	l.Level = logrus.InfoLevel
-	if os.Getenv("YAGPDB_TESTING") != "" || os.Getenv("YAGPDB_DEBUG_LOG") != "" {
-		l.Level = logrus.DebugLevel
-	}
-
-	l.Hooks = cop
-	l.Formatter = &PrefixedLogFormatter{
-		Inner:  stdLogger.Formatter,
-		Prefix: "[" + prefix + "] ",
-	}
-
-	loggersmu.Lock()
-	loggers = append(loggers, l)
-	loggersmu.Unlock()
-
-	return l
+func GetFixedPrefixLogger(prefix string) *logrus.Entry {
+	return logrus.WithField("p", prefix)
 }

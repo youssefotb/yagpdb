@@ -5,25 +5,23 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jonas747/discordgo"
-	"github.com/jonas747/oauth2"
 	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/models"
-)
-
-const (
-	SessionCookieName = "yagpdb-session"
+	"golang.org/x/oauth2"
 )
 
 var (
-	oauthConf *oauth2.Config
+	SessionCookieName = "yagpdb-session"
+	OauthConf         *oauth2.Config
 )
 
 func InitOauth() {
-	oauthConf = &oauth2.Config{
+	OauthConf = &oauth2.Config{
 		ClientID:     common.ConfClientID.GetString(),
 		ClientSecret: common.ConfClientSecret.GetString(),
 		Scopes:       []string{"identify", "guilds"},
@@ -34,9 +32,9 @@ func InitOauth() {
 	}
 
 	if https || exthttps {
-		oauthConf.RedirectURL = "https://" + common.ConfHost.GetString() + "/confirm_login"
+		OauthConf.RedirectURL = "https://" + common.ConfHost.GetString() + "/confirm_login"
 	} else {
-		oauthConf.RedirectURL = "http://" + common.ConfHost.GetString() + "/confirm_login"
+		OauthConf.RedirectURL = "http://" + common.ConfHost.GetString() + "/confirm_login"
 	}
 }
 
@@ -49,11 +47,11 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	redir := r.FormValue("goto")
-	if redir != "" {
+	if redir != "" && strings.HasPrefix(redir, "/") {
 		common.RedisPool.Do(retryableredis.Cmd(nil, "SET", "csrf_redir:"+csrfToken, redir, "EX", "500"))
 	}
 
-	url := oauthConf.AuthCodeURL(csrfToken, oauth2.AccessTypeOnline)
+	url := OauthConf.AuthCodeURL(csrfToken, oauth2.AccessTypeOnline)
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
@@ -72,7 +70,7 @@ func HandleConfirmLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	code := r.FormValue("code")
-	token, err := oauthConf.Exchange(ctx, code)
+	token, err := OauthConf.Exchange(ctx, code)
 	if err != nil {
 		CtxLogger(ctx).WithError(err).Error("oauthConf.Exchange() failed")
 		http.Redirect(w, r, "/?error=oauth2failure", http.StatusTemporaryRedirect)
@@ -194,45 +192,54 @@ func CreateCookieSession(token *oauth2.Token) (cookie *http.Cookie, err error) {
 	return cookie, nil
 }
 
-// HasAccesstoGuildSettings retrusn true if the specified user (or 0 if not logged in or not on the server) has access
-func HasAccesstoGuildSettings(userID int64, g *common.GuildWithConnected, config *models.CoreConfig, roleProvider func(guildID, userID int64) []int64, write bool) bool {
+func GetUserAccessLevel(userID int64, g *common.GuildWithConnected, config *models.CoreConfig, roleProvider func(guildID, userID int64) []int64) (hasRead bool, hasWrite bool) {
 	// if they are the owner or they have manage server perms, then they have full access
 	if g.Owner || g.Permissions&discordgo.PermissionManageServer == discordgo.PermissionManageServer {
-		return true
+		return true, true
 	} else if !g.Connected {
 		// otherwise if the bot is not on the guild then there's no config so no extra access control settings
-		return false
+		return false, false
 	}
 
-	if !write && config.AllowNonMembersReadOnly {
-		// everyone is allowed read access, no further checks needed
-		return true
-	}
-
-	if !write && userID != 0 && config.AllowAllMembersReadOnly {
+	if config.AllowNonMembersReadOnly {
+		// everyone is allowed read access
+		hasRead = true
+	} else if userID != 0 && config.AllowAllMembersReadOnly {
 		// logged in and a member of the guild
-		return true
+		hasRead = true
 	}
 
 	if len(config.AllowedWriteRoles) < 1 && len(config.AllowedReadOnlyRoles) < 1 {
-		// no need to check the roles
-		return false
+		// no need to check the roles, nothing set up
+		return
 	}
 
 	if userID == 0 {
 		// not a member of the guild
-		return false
+		return
 	}
 
 	roles := roleProvider(g.ID, userID)
 
 	if common.ContainsInt64SliceOneOf(roles, config.AllowedWriteRoles) {
 		// the user has one of the write roles
-		return true
+		return true, true
 	}
 
-	if !write && common.ContainsInt64SliceOneOf(roles, config.AllowedReadOnlyRoles) {
-		// this is a read request and the user has one of the read roles
+	if hasRead || common.ContainsInt64SliceOneOf(roles, config.AllowedReadOnlyRoles) {
+		// the user has one of the read roles
+		return true, false
+	}
+
+	return
+}
+
+// HasAccesstoGuildSettings retrusn true if the specified user (or 0 if not logged in or not on the server) has access
+func HasAccesstoGuildSettings(userID int64, g *common.GuildWithConnected, config *models.CoreConfig, roleProvider func(guildID, userID int64) []int64, write bool) bool {
+	hasRead, hasWrite := GetUserAccessLevel(userID, g, config, roleProvider)
+	if hasWrite {
+		return true
+	} else if hasRead && !write {
 		return true
 	}
 
