@@ -64,7 +64,7 @@ func (p *Plugin) AddCommands() {
 		},
 
 		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
-			count, err := models.Giveaways(models.GiveawayWhere.GuildID.EQ(parsed.GS.ID)).CountG(parsed.Context())
+			count, err := models.Giveaways(models.GiveawayWhere.GuildID.EQ(parsed.GS.ID), models.GiveawayWhere.EndedAt.IsNotNull()).CountG(parsed.Context())
 			if err != nil {
 				return nil, err
 			}
