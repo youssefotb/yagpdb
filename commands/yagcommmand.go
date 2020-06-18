@@ -12,11 +12,13 @@ import (
 	"github.com/jonas747/dcmd"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/dstate"
-	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/analytics"
 	"github.com/jonas747/yagpdb/bot"
 	"github.com/jonas747/yagpdb/commands/models"
 	"github.com/jonas747/yagpdb/common"
+	"github.com/mediocregopher/radix/v3"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
 	"github.com/volatiletech/sqlboiler/queries/qm"
 )
@@ -136,6 +138,11 @@ func (yc *YAGCommand) Switches() []*dcmd.ArgDef {
 	return yc.ArgSwitches
 }
 
+var metricsExcecutedCommands = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "bot_commands_total",
+	Help: "Commands the bot executed",
+}, []string{"name"})
+
 func (yc *YAGCommand) Run(data *dcmd.Data) (interface{}, error) {
 	if !yc.RunInDM && data.Source == dcmd.DMSource {
 		return nil, nil
@@ -156,12 +163,18 @@ func (yc *YAGCommand) Run(data *dcmd.Data) (interface{}, error) {
 
 	cState := data.CS
 
+	cmdFullName := yc.Name
+	if len(data.ContainerChain) > 1 {
+		lastContainer := data.ContainerChain[len(data.ContainerChain)-1]
+		cmdFullName = lastContainer.Names[0] + " " + cmdFullName
+	}
+
 	// Set up log entry for later use
 	logEntry := &common.LoggedExecutedCommand{
 		UserID:    discordgo.StrID(data.Msg.Author.ID),
 		ChannelID: discordgo.StrID(data.Msg.ChannelID),
 
-		Command:    yc.Name,
+		Command:    cmdFullName,
 		RawCommand: data.Msg.Content,
 		TimeStamp:  time.Now(),
 	}
@@ -170,9 +183,7 @@ func (yc *YAGCommand) Run(data *dcmd.Data) (interface{}, error) {
 		logEntry.GuildID = discordgo.StrID(cState.Guild.ID)
 	}
 
-	if common.Statsd != nil {
-		go common.Statsd.Incr("yagpdb.cmd.executed", nil, 1)
-	}
+	metricsExcecutedCommands.With(prometheus.Labels{"name": "(other)"}).Inc()
 
 	logger.Info("Handling command: " + data.Msg.Content)
 
@@ -201,7 +212,7 @@ func (yc *YAGCommand) Run(data *dcmd.Data) (interface{}, error) {
 		}
 
 		if yc.Plugin != nil {
-			go analytics.RecordActiveUnit(data.Msg.GuildID, yc.Plugin, "cmd_executed_"+strings.ToLower(yc.Name))
+			go analytics.RecordActiveUnit(data.Msg.GuildID, yc.Plugin, "cmd_executed_"+strings.ToLower(cmdFullName))
 		}
 	}
 
@@ -276,7 +287,7 @@ func (yc *YAGCommand) PostCommandExecuted(settings *CommandSettings, cmdData *dc
 	if cmdData.GS != nil {
 		switch resp.(type) {
 		case *discordgo.MessageEmbed, []*discordgo.MessageEmbed:
-			if !bot.BotProbablyHasPermissionGS(true, cmdData.GS, cmdData.CS.ID, discordgo.PermissionEmbedLinks) {
+			if !bot.BotProbablyHasPermissionGS(cmdData.GS, cmdData.CS.ID, discordgo.PermissionEmbedLinks) {
 				resp = "This command returned an embed but the bot does not have embed links permissions in this channel, cannot send the response."
 			}
 		}
@@ -349,7 +360,7 @@ func (yc *YAGCommand) checkCanExecuteCommand(data *dcmd.Data, cState *dstate.Cha
 			return
 		}
 
-		if !bot.BotProbablyHasPermissionGS(true, guild, cState.ID, discordgo.PermissionReadMessages|discordgo.PermissionSendMessages) {
+		if !bot.BotProbablyHasPermissionGS(guild, cState.ID, discordgo.PermissionReadMessages|discordgo.PermissionSendMessages) {
 			return
 		}
 
@@ -367,7 +378,7 @@ func (yc *YAGCommand) checkCanExecuteCommand(data *dcmd.Data, cState *dstate.Cha
 			return
 		}
 
-		member := ContextMS(data.Context())
+		member := data.MS
 		// Check the required and ignored roles
 		if len(settings.RequiredRoles) > 0 {
 			found := false
@@ -486,7 +497,7 @@ func (cs *YAGCommand) customEnabled(guildID int64) (bool, error) {
 
 	// Check redis for settings
 	var enabled bool
-	err := common.RedisPool.Do(retryableredis.Cmd(&enabled, "GET", cs.Key+discordgo.StrID(guildID)))
+	err := common.RedisPool.Do(radix.Cmd(&enabled, "GET", cs.Key+discordgo.StrID(guildID)))
 	if err != nil {
 		return false, err
 	}
@@ -650,7 +661,7 @@ func (cs *YAGCommand) UserScopeCooldownLeft(cc []*dcmd.Container, userID int64) 
 	}
 
 	var ttl int
-	err := common.RedisPool.Do(retryableredis.Cmd(&ttl, "TTL", RKeyCommandCooldown(userID, cs.FindNameFromContainerChain(cc))))
+	err := common.RedisPool.Do(radix.Cmd(&ttl, "TTL", RKeyCommandCooldown(userID, cs.FindNameFromContainerChain(cc))))
 	if err != nil {
 		return 0, errors.WithStackIf(err)
 	}
@@ -665,7 +676,7 @@ func (cs *YAGCommand) GuildScopeCooldownLeft(cc []*dcmd.Container, guildID int64
 	}
 
 	var ttl int
-	err := common.RedisPool.Do(retryableredis.Cmd(&ttl, "TTL", RKeyCommandCooldownGuild(guildID, cs.FindNameFromContainerChain(cc))))
+	err := common.RedisPool.Do(radix.Cmd(&ttl, "TTL", RKeyCommandCooldownGuild(guildID, cs.FindNameFromContainerChain(cc))))
 	if err != nil {
 		return 0, errors.WithStackIf(err)
 	}
@@ -695,7 +706,7 @@ func (cs *YAGCommand) SetCooldownUser(cc []*dcmd.Container, userID int64) error 
 	}
 	now := time.Now().Unix()
 
-	err := common.RedisPool.Do(retryableredis.FlatCmd(nil, "SET", RKeyCommandCooldown(userID, cs.FindNameFromContainerChain(cc)), now, "EX", cs.Cooldown))
+	err := common.RedisPool.Do(radix.FlatCmd(nil, "SET", RKeyCommandCooldown(userID, cs.FindNameFromContainerChain(cc)), now, "EX", cs.Cooldown))
 	return errors.WithStackIf(err)
 }
 
@@ -706,7 +717,7 @@ func (cs *YAGCommand) SetCooldownGuild(cc []*dcmd.Container, guildID int64) erro
 	}
 
 	now := time.Now().Unix()
-	err := common.RedisPool.Do(retryableredis.FlatCmd(nil, "SET", RKeyCommandCooldownGuild(guildID, cs.FindNameFromContainerChain(cc)), now, "EX", cs.GuildScopeCooldown))
+	err := common.RedisPool.Do(radix.FlatCmd(nil, "SET", RKeyCommandCooldownGuild(guildID, cs.FindNameFromContainerChain(cc)), now, "EX", cs.GuildScopeCooldown))
 	return errors.WithStackIf(err)
 }
 

@@ -56,6 +56,12 @@ func tmplCArg(typ string, name string, opts ...interface{}) (*dcmd.ArgDef, error
 		} else {
 			def.Type = dcmd.Int
 		}
+	case "float":
+		if len(opts) >= 2 {
+			def.Type = &dcmd.FloatArg{Min: templates.ToFloat64(opts[0]), Max: templates.ToFloat64(opts[1])}
+		} else {
+			def.Type = dcmd.Float
+		}
 	case "duration":
 		if len(opts) >= 2 {
 			def.Type = &commands.DurationArg{Min: time.Duration(templates.ToInt64(opts[0])), Max: time.Duration(templates.ToInt64(opts[1]))}
@@ -88,8 +94,6 @@ func tmplExpectArgs(ctx *templates.Context) interface{} {
 
 		result.defs = args
 
-		ctxMember := ctx.MS
-
 		msg := ctx.Msg
 		stripped := ctx.Data["StrippedMsg"].(string)
 		split := dcmd.SplitArgs(stripped)
@@ -100,9 +104,6 @@ func tmplExpectArgs(ctx *templates.Context) interface{} {
 			return result, errors.WithMessage(err, "tmplExpectArgs")
 		}
 
-		dcmdData.MsgStrippedPrefix = stripped
-		dcmdData = dcmdData.WithContext(context.WithValue(dcmdData.Context(), commands.CtxKeyMS, ctxMember))
-
 		// attempt to parse them
 		err = dcmd.ParseArgDefs(args, numRequired, nil, dcmdData, split)
 		if err != nil {
@@ -112,6 +113,7 @@ func tmplExpectArgs(ctx *templates.Context) interface{} {
 				ctx.FixedOutput = err.Error() + "\nUsage: `" + (*dcmd.StdHelpFormatter).ArgDefLine(nil, args, numRequired) + "`"
 			}
 		}
+
 		result.parsed = dcmdData.Args
 		return result, err
 	}
@@ -137,10 +139,7 @@ func (pa *ParsedArgs) Get(index int) interface{} {
 		}
 
 		c := i.(*dstate.ChannelState)
-		c.Owner.RLock()
-		cop := c.DGoCopy()
-		c.Owner.RUnlock()
-		return cop
+		return templates.CtxChannelFromCSLocked(c)
 	case *commands.MemberArg:
 		i := pa.parsed[index].Value
 		if i == nil {

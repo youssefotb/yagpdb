@@ -2,6 +2,8 @@ package main
 
 import (
 	"github.com/jonas747/yagpdb/analytics"
+	"github.com/jonas747/yagpdb/common/featureflags"
+	"github.com/jonas747/yagpdb/common/prom"
 	"github.com/jonas747/yagpdb/common/run"
 
 	// Core yagpdb packages
@@ -85,6 +87,8 @@ func main() {
 	timezonecompanion.RegisterPlugin()
 	admin.RegisterPlugin()
 	internalapi.RegisterPlugin()
+	prom.RegisterPlugin()
+	featureflags.RegisterPlugin()
 
 	run.Run()
 }

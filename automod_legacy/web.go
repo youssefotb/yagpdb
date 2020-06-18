@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/jonas747/discordgo"
+	"github.com/jonas747/yagpdb/common/featureflags"
 	"github.com/jonas747/yagpdb/common/pubsub"
 	"github.com/jonas747/yagpdb/web"
 	"goji.io"
@@ -67,6 +68,7 @@ func ExtraPostMW(inner http.Handler) http.Handler {
 	mw := func(w http.ResponseWriter, r *http.Request) {
 		activeGuild, _ := web.GetBaseCPContextData(r.Context())
 		pubsub.Publish("update_automod_legacy_rules", activeGuild.ID, nil)
+		featureflags.MarkGuildDirty(activeGuild.ID)
 		inner.ServeHTTP(w, r)
 	}
 	return http.HandlerFunc(mw)
@@ -77,7 +79,7 @@ var _ web.PluginWithServerHomeWidget = (*Plugin)(nil)
 func (p *Plugin) LoadServerHomeWidget(w http.ResponseWriter, r *http.Request) (web.TemplateData, error) {
 	g, templateData := web.GetBaseCPContextData(r.Context())
 
-	templateData["WidgetTitle"] = "Legacy Automod"
+	templateData["WidgetTitle"] = "Basic Automod"
 	templateData["SettingsPath"] = "/automod_legacy"
 
 	config, err := GetConfig(g.ID)
@@ -93,9 +95,9 @@ func (p *Plugin) LoadServerHomeWidget(w http.ResponseWriter, r *http.Request) (w
 
 	const format = `<ul>
 	<li>Slowmode: %s</li>
-	<li>Mass Mention: %s</li>
-	<li>Server Invites: %s</li>
-	<li>Any Links: %s</li>
+	<li>Mass mention: %s</li>
+	<li>Server invites: %s</li>
+	<li>Any links: %s</li>
 	<li>Banned words: %s</li>
 	<li>Banned websites: %s</li>
 </ul>`

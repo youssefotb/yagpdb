@@ -11,11 +11,11 @@ import (
 	"github.com/dghubble/go-twitter/twitter"
 	"github.com/jonas747/discordgo"
 	"github.com/jonas747/yagpdb/analytics"
-	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/mqueue"
 	"github.com/jonas747/yagpdb/feeds"
 	"github.com/jonas747/yagpdb/premium"
 	"github.com/jonas747/yagpdb/twitter/models"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/volatiletech/sqlboiler/boil"
 )
 
@@ -150,13 +150,13 @@ func (p *Plugin) handleTweet(t *twitter.Tweet) {
 	}
 
 	p.feedsLock.Lock()
-	feeds := p.feeds
+	tFeeds := p.feeds
 	p.feedsLock.Unlock()
 
 	relevantFeeds := make([]*models.TwitterFeed, 0, 4)
 
 OUTER:
-	for _, f := range feeds {
+	for _, f := range tFeeds {
 		if t.User.ID != f.TwitterUserID {
 			continue
 		}
@@ -166,6 +166,16 @@ OUTER:
 			if f.ChannelID == r.ChannelID {
 				continue OUTER
 			}
+		}
+
+		isRetweet := t.RetweetedStatus != nil
+		if isRetweet && !f.IncludeRT {
+			continue
+		}
+
+		isReply := t.InReplyToScreenName != "" || t.InReplyToStatusID != 0 || t.InReplyToUserID != 0
+		if isReply && !f.IncludeReplies {
+			continue
 		}
 
 		relevantFeeds = append(relevantFeeds, f)
@@ -195,9 +205,7 @@ OUTER:
 		})
 	}
 
-	if common.Statsd != nil {
-		common.Statsd.Count("yagpdb.twitter.matches", int64(len(relevantFeeds)), nil, 1)
-	}
+	feeds.MetricPostedMessages.With(prometheus.Labels{"source": "twitter"}).Add(float64(len(relevantFeeds)))
 
 	logger.Infof("Handled tweet %q on %d channels", t.Text, len(relevantFeeds))
 }

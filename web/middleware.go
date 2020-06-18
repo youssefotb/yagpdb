@@ -20,6 +20,8 @@ import (
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/config"
 	"github.com/miolini/datacounter"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
 	"goji.io/pat"
 )
@@ -173,6 +175,28 @@ func RequireSessionMiddleware(inner http.Handler) http.Handler {
 	return http.HandlerFunc(mw)
 }
 
+func CSRFProtectionMW(inner http.Handler) http.Handler {
+	mw := func(w http.ResponseWriter, r *http.Request) {
+		// validate the origin header (if present) for protection against CSRF attacks
+		// i don't think putting in more protection against CSRF attacks is needed, considering literally every browser these days support it
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			split := strings.SplitN(origin, ":", 3)
+			hostSplit := strings.SplitN(common.ConfHost.GetString(), ":", 2)
+
+			if len(split) < 2 || !strings.EqualFold("//"+hostSplit[0], split[1]) {
+				CtxLogger(r.Context()).Error("Mismatched origin: ", hostSplit[0]+" : "+split[1])
+				WriteErrorResponse(w, r, "Bad origin", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		inner.ServeHTTP(w, r)
+	}
+
+	return http.HandlerFunc(mw)
+}
+
 // UserInfoMiddleware fills the context with user information and the guilds it's on guilds if possible
 func UserInfoMiddleware(inner http.Handler) http.Handler {
 	mw := func(w http.ResponseWriter, r *http.Request) {
@@ -192,8 +216,16 @@ func UserInfoMiddleware(inner http.Handler) http.Handler {
 			// nothing in cache...
 			user, err = session.UserMe()
 			if err != nil {
-				CtxLogger(r.Context()).WithError(err).Error("Failed getting user info from discord")
-				HandleLogout(w, r)
+				if !common.IsDiscordErr(err, discordgo.ErrCodeUnauthorized) {
+					CtxLogger(r.Context()).WithError(err).Error("Failed getting user info from discord")
+				}
+
+				if r.URL.Path == "/logout" {
+					inner.ServeHTTP(w, r)
+					return
+				}
+
+				http.Redirect(w, r, "/logout", http.StatusTemporaryRedirect)
 				return
 			}
 
@@ -846,12 +878,20 @@ func SetGuildMemberMiddleware(inner http.Handler) http.Handler {
 	return http.HandlerFunc(mw)
 }
 
+func isStatic(r *http.Request) bool {
+	if r.URL.Path == "/robots.txt" || len(r.URL.Path) > 8 && r.URL.Path[:8] == "/static/" {
+		return true
+	}
+
+	return false
+}
+
 // SkipStaticMW skips the "maybeSkip" handler if this is a static link
 func SkipStaticMW(maybeSkip func(http.Handler) http.Handler, alwaysRunSuffixes ...string) func(http.Handler) http.Handler {
 	return func(alwaysRun http.Handler) http.Handler {
 		mw := func(w http.ResponseWriter, r *http.Request) {
 			// reliable enough... *cough cough*
-			if r.URL.Path == "/robots.txt" || len(r.URL.Path) > 8 && r.URL.Path[:8] == "/static/" {
+			if isStatic(r) {
 
 				// in some cases (like the gzip handler) we wanna run certain middlewares on certain files
 				for _, v := range alwaysRunSuffixes {
@@ -872,6 +912,23 @@ func SkipStaticMW(maybeSkip func(http.Handler) http.Handler, alwaysRunSuffixes .
 
 		return http.HandlerFunc(mw)
 	}
+}
+
+var pageHitsStatic = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "yagpdb_web_hits_total",
+	Help: "Web hits total",
+}, []string{"type"})
+
+func addPromCountMW(inner http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t := "normal"
+		if isStatic(r) {
+			t = "static"
+		}
+
+		pageHitsStatic.With(prometheus.Labels{"type": t}).Inc()
+		inner.ServeHTTP(w, r)
+	})
 }
 
 // RequireBotOwnerMW requires the user to be logged in and that they're a bot owner

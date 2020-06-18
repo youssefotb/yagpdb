@@ -15,12 +15,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/DataDog/datadog-go/statsd"
 	"github.com/jinzhu/gorm"
 	_ "github.com/jinzhu/gorm/dialects/postgres"
 	"github.com/jonas747/discordgo"
-	"github.com/jonas747/retryableredis"
-	"github.com/jonas747/yagpdb/common/basicredispool"
+	"github.com/mediocregopher/radix/v3"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
 	"github.com/volatiletech/sqlboiler/boil"
 )
@@ -31,14 +31,12 @@ var (
 	GORM *gorm.DB
 	PQ   *sql.DB
 
-	RedisPool *basicredispool.Pool
+	RedisPool *radix.Pool
 
 	BotSession *discordgo.Session
 	BotUser    *discordgo.User
 
 	RedisPoolSize = 0
-
-	Statsd *statsd.Client
 
 	Testing = os.Getenv("YAGPDB_TESTING") != ""
 
@@ -64,7 +62,7 @@ func CoreInit() error {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
 
-	err := connectRedis()
+	err := connectRedis(false)
 	if err != nil {
 		return err
 	}
@@ -85,8 +83,6 @@ func Init() error {
 		return err
 	}
 
-	ConnectDatadog()
-
 	db := "yagpdb"
 	if ConfPQDB.GetString() != "" {
 		db = ConfPQDB.GetString()
@@ -106,7 +102,7 @@ func Init() error {
 		User: BotUser,
 	}
 
-	err = RedisPool.Do(retryableredis.Cmd(&CurrentRunCounter, "INCR", "yagpdb_run_counter"))
+	err = RedisPool.Do(radix.Cmd(&CurrentRunCounter, "INCR", "yagpdb_run_counter"))
 	if err != nil {
 		panic(err)
 	}
@@ -166,26 +162,6 @@ func setupGlobalDGoSession() (err error) {
 	return nil
 }
 
-func ConnectDatadog() {
-	if ConfDogStatsdAddress.GetString() == "" {
-		logger.Warn("No datadog info provided, not connecting to datadog aggregator")
-		return
-	}
-
-	client, err := statsd.New(ConfDogStatsdAddress.GetString())
-	if err != nil {
-		logger.WithError(err).Error("Failed connecting to dogstatsd, datadog integration disabled")
-		return
-	}
-
-	if NodeID != "" {
-		client.Tags = append(client.Tags, "node:"+NodeID)
-	}
-
-	Statsd = client
-
-}
-
 func InitTest() {
 	testDB := os.Getenv("YAGPDB_TEST_DB")
 	if testDB == "" {
@@ -198,7 +174,18 @@ func InitTest() {
 	}
 }
 
-func connectRedis() (err error) {
+var (
+	metricsRedisReconnects = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "yagpdb_redis_reconnects_total",
+		Help: "Number of reconnects to the redis server",
+	})
+	metricsRedisRetries = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "yagpdb_redis_retries_total",
+		Help: "Number of retries on redis commands",
+	})
+)
+
+func connectRedis(unitTests bool) (err error) {
 	maxConns := RedisPoolSize
 	if maxConns == 0 {
 		maxConns, _ = strconv.Atoi(os.Getenv("YAGPDB_REDIS_POOL_SIZE"))
@@ -216,28 +203,31 @@ func connectRedis() (err error) {
 		addr = "localhost:6379"
 	}
 
-	RedisPool, err = basicredispool.NewPool(maxConns, &retryableredis.DialConfig{
-		Network: "tcp",
-		Addr:    addr,
-		OnReconnect: func(err error) {
-			if err == nil {
-				return
-			}
+	opts := []radix.PoolOpt{
+		radix.PoolOnEmptyWait(),
+		radix.PoolOnFullClose(),
+		radix.PoolPipelineWindow(0, 0),
+	}
 
-			logrus.WithError(err).Warn("[core] redis reconnect triggered")
-			if Statsd != nil {
-				Statsd.Incr("yagpdb.redis.reconnects", nil, 1)
-			}
-		},
-		OnRetry: func(err error) {
-			logrus.WithError(err).Warn("[core] redis retrying failed action")
-			if Statsd != nil {
-				Statsd.Incr("yagpdb.redis.retries", nil, 1)
-			}
-		},
-	})
+	// if were running unit tests, use the 2nd db to avoid accidentally running tests against a main db
+	if unitTests {
+		radix.PoolConnFunc(func(network, addr string) (radix.Conn, error) {
+			return radix.Dial(network, addr, radix.DialSelectDB(2))
+		})
+	}
 
+	RedisPool, err = radix.NewPool("tcp", addr, maxConns, opts...)
 	return
+}
+
+// InitTestRedis sets common.RedisPool to a redis pool for unit testing
+func InitTestRedis() error {
+	if RedisPool != nil {
+		return nil
+	}
+
+	err := connectRedis(true)
+	return err
 }
 
 func connectDB(host, user, pass, dbName string, maxConns int) error {

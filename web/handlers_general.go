@@ -16,12 +16,12 @@ import (
 	"time"
 
 	"github.com/jonas747/discordgo"
-	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/bot/botrest"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/models"
 	"github.com/jonas747/yagpdb/common/patreon"
 	"github.com/jonas747/yagpdb/web/discordblog"
+	"github.com/mediocregopher/radix/v3"
 	"github.com/patrickmn/go-cache"
 	"goji.io/pat"
 )
@@ -140,7 +140,7 @@ func HandleLandingPage(w http.ResponseWriter, r *http.Request) (TemplateData, er
 	_, tmpl := GetCreateTemplateData(r.Context())
 
 	var joinedServers int
-	common.RedisPool.Do(retryableredis.Cmd(&joinedServers, "SCARD", "connected_guilds"))
+	common.RedisPool.Do(radix.Cmd(&joinedServers, "SCARD", "connected_guilds"))
 
 	tmpl["JoinedServers"] = joinedServers
 	tmpl["DemoServerID"] = confDemoServerID.GetString()
@@ -446,10 +446,10 @@ func (p *ControlPanelPlugin) LoadServerHomeWidget(w http.ResponseWriter, r *http
 	config := r.Context().Value(common.ContextKeyCoreConfig).(*models.CoreConfig)
 
 	const format = `<ul>
-	<li>Read Only roles: <code>%d</code></li>
-	<li>Write Roles: <code>%d</code></li>
-	<li>All members read only: %s</li>
-	<li>Allow absolutely everyone read only access: %s</li>
+	<li>Read-only roles: <code>%d</code></li>
+	<li>Write roles: <code>%d</code></li>
+	<li>All members read-only: %s</li>
+	<li>Allow absolutely everyone read-only access: %s</li>
 </ul>`
 	templateData["WidgetBody"] = template.HTML(fmt.Sprintf(format, len(config.AllowedReadOnlyRoles), len(config.AllowedWriteRoles), EnabledDisabledSpanStatus(config.AllowAllMembersReadOnly), EnabledDisabledSpanStatus(config.AllowNonMembersReadOnly)))
 

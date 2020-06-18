@@ -3,7 +3,8 @@ package bot
 //go:generate sqlboiler --no-hooks psql
 
 import (
-	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,11 +12,13 @@ import (
 	"github.com/jonas747/dshardorchestrator/v2/node"
 	"github.com/jonas747/dstate"
 	dshardmanager "github.com/jonas747/jdshardmanager"
-	"github.com/jonas747/retryableredis"
 	"github.com/jonas747/yagpdb/bot/eventsystem"
 	"github.com/jonas747/yagpdb/common"
 	"github.com/jonas747/yagpdb/common/config"
 	"github.com/jonas747/yagpdb/common/pubsub"
+	"github.com/mediocregopher/radix/v3"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 var (
@@ -35,6 +38,24 @@ var (
 	confConnStatus               = config.RegisterOption("yagpdb.connstatus.channel", "Gateway connection status channel", 0)
 	confShardOrchestratorAddress = config.RegisterOption("yagpdb.orchestrator.address", "Sharding orchestrator address to connect to, if set it will be put into orchstration mode", "")
 	confLargeBotShardingEnabled  = config.RegisterOption("yagpdb.large_bot_sharding", "Set to enable large bot sharding (for 200k+ guilds)", false)
+
+	confFixedShardingConfig = config.RegisterOption("yagpdb.sharding.fixed_config", "Fixed sharding config, mostly used during testing, allows you to run a single shard, the format is: 'id,count', example: '0,10'", "")
+
+	usingFixedSharding bool
+	fixedShardingID    int
+
+	// Note yags is using priviledged intents
+	gatewayIntentsUsed = []discordgo.GatewayIntent{
+		discordgo.GatewayIntentGuilds,
+		discordgo.GatewayIntentGuildMembers,
+		discordgo.GatewayIntentGuildBans,
+		discordgo.GatewayIntentGuildVoiceStates,
+		discordgo.GatewayIntentGuildPresences,
+		discordgo.GatewayIntentGuildMessages,
+		discordgo.GatewayIntentGuildMessageReactions,
+		discordgo.GatewayIntentDirectMessages,
+		discordgo.GatewayIntentDirectMessageReactions,
+	}
 )
 
 var (
@@ -67,7 +88,12 @@ func Run(nodeID string) {
 		NodeConn = node.NewNodeConn(&NodeImpl{}, orcheStratorAddress, common.VERSION, nodeID, nil)
 		NodeConn.Run()
 	} else {
-		go ShardManager.Start()
+		ShardManager.Init()
+		if usingFixedSharding {
+			go ShardManager.Session(fixedShardingID).Open()
+		} else {
+			go ShardManager.Start()
+		}
 		botReady()
 	}
 }
@@ -80,19 +106,23 @@ func setup() {
 	setupState()
 	addBotHandlers()
 	setupShardManager()
-
-	common.BotSession.AddHandler(eventsystem.HandleEvent)
 }
 
 func setupStandalone() {
-	shardCount, err := ShardManager.GetRecommendedCount()
-	if err != nil {
-		panic("Failed getting shard count: " + err.Error())
+	if confFixedShardingConfig.GetString() == "" {
+		shardCount, err := ShardManager.GetRecommendedCount()
+		if err != nil {
+			panic("Failed getting shard count: " + err.Error())
+		}
+		totalShardCount = shardCount
+	} else {
+		fixedShardingID, totalShardCount = readFixedShardingConfig()
+		usingFixedSharding = true
+		ShardManager.SetNumShards(totalShardCount)
 	}
-	totalShardCount = shardCount
 
-	EventLogger.init(shardCount)
-	eventsystem.InitWorkers(shardCount)
+	EventLogger.init(totalShardCount)
+	eventsystem.InitWorkers(totalShardCount)
 	ReadyTracker.initTotalShardCount(totalShardCount)
 
 	go EventLogger.run()
@@ -101,10 +131,34 @@ func setupStandalone() {
 		ReadyTracker.shardsAdded(i)
 	}
 
-	err = common.RedisPool.Do(retryableredis.FlatCmd(nil, "SET", "yagpdb_total_shards", shardCount))
+	err := common.RedisPool.Do(radix.FlatCmd(nil, "SET", "yagpdb_total_shards", totalShardCount))
 	if err != nil {
 		logger.WithError(err).Error("failed setting shard count")
 	}
+}
+
+func readFixedShardingConfig() (id int, count int) {
+	conf := confFixedShardingConfig.GetString()
+	if conf == "" {
+		return 0, 0
+	}
+
+	split := strings.SplitN(conf, ",", 2)
+	if len(split) < 2 {
+		panic("Invalid yagpdb.sharding.fixed_config: " + conf)
+	}
+
+	parsedID, err := strconv.ParseInt(split[0], 10, 64)
+	if err != nil {
+		panic("Invalid yagpdb.sharding.fixed_config: " + err.Error())
+	}
+
+	parsedCount, err := strconv.ParseInt(split[1], 10, 64)
+	if err != nil {
+		panic("Invalid yagpdb.sharding.fixed_config: " + err.Error())
+	}
+
+	return int(parsedID), int(parsedCount)
 }
 
 // called when the bot is ready and the shards have started connecting
@@ -113,7 +167,6 @@ func botReady() {
 		updateAllShardStatuses()
 	}, nil)
 
-	pubsub.AddHandler("global_ratelimit", handleGlobalRatelimtPusub, GlobalRatelimitTriggeredEventData{})
 	pubsub.AddHandler("bot_core_evict_gs_cache", handleEvictCachePubsub, "")
 
 	serviceDetails := "Not using orchestrator"
@@ -138,11 +191,9 @@ func botReady() {
 		}
 	}
 
-	if common.Statsd != nil {
-		go goroutineLogger()
-	}
-
+	go runUpdateMetrics()
 	go loopCheckAdmins()
+
 	watchMemusage()
 }
 
@@ -205,7 +256,7 @@ func (rl *identifyRatelimiter) RatelimitIdentify(shardID int) {
 		// closes, probably due to small variances in networking and scheduling latencies
 		// Adding a extra 100ms fixes this completely, but to be on the safe side we add a extra 50ms
 		var resp string
-		err := common.RedisPool.Do(retryableredis.Cmd(&resp, "SET", key, "1", "PX", "5150", "NX"))
+		err := common.RedisPool.Do(radix.Cmd(&resp, "SET", key, "1", "PX", "5150", "NX"))
 		if err != nil {
 			logger.WithError(err).Error("failed ratelimiting gateway")
 			time.Sleep(time.Second)
@@ -255,25 +306,29 @@ func (rl *identifyRatelimiter) checkSameBucket(shardID int) bool {
 	return true
 }
 
-func goroutineLogger() {
-	t := time.NewTicker(time.Second * 10)
-	for {
-		<-t.C
+var (
+	metricsCacheHits = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "yagpdb_state_cache_hits_total",
+		Help: "Cache hits in the satte cache",
+	})
 
-		num := runtime.NumGoroutine()
-		common.Statsd.Gauge("yagpdb.numgoroutine", float64(num), nil, 1)
-	}
-}
+	metricsCacheMisses = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "yagpdb_state_cache_misses_total",
+		Help: "Cache misses in the sate cache",
+	})
 
-type GlobalRatelimitTriggeredEventData struct {
-	Reset  time.Time `json:"reset"`
-	Bucket string    `json:"bucket"`
-}
+	metricsCacheEvictions = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "yagpdb_state_cache_evicted_total",
+		Help: "Cache evictions",
+	})
 
-func handleGlobalRatelimtPusub(evt *pubsub.Event) {
-	data := evt.Data.(*GlobalRatelimitTriggeredEventData)
-	common.BotSession.Ratelimiter.SetGlobalTriggered(data.Reset)
-}
+	metricsCacheMemberEvictions = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "yagpdb_state_members_evicted_total",
+		Help: "Members evicted from state cache",
+	})
+)
+
+var confStateRemoveOfflineMembers = config.RegisterOption("yagpdb.state.remove_offline_members", "Gateway connection logging channel", true)
 
 func setupState() {
 	// Things may rely on state being available at this point for initialization
@@ -284,15 +339,21 @@ func setupState() {
 	State.ThrowAwayDMMessages = true
 	State.TrackPrivateChannels = false
 	State.CacheExpirey = time.Minute * 30
-	// State.RemoveOfflineMembers = true
+
+	if confStateRemoveOfflineMembers.GetBool() {
+		State.RemoveOfflineMembers = true
+	}
+
 	go State.RunGCWorker()
 
 	eventsystem.DiscordState = State
 
-	// track cache hits/misses to statsd
+	// track cache hits/misses
 	go func() {
 		lastHits := int64(0)
 		lastMisses := int64(0)
+		lastEvictionsCache := int64(0)
+		lastEvictionsMembers := int64(0)
 
 		ticker := time.NewTicker(time.Minute)
 		for {
@@ -304,13 +365,14 @@ func setupState() {
 			lastHits = stats.CacheHits
 			lastMisses = stats.CacheMisses
 
-			if common.Statsd != nil {
-				common.Statsd.Count("yagpdb.state.cache_hits", deltaHits, nil, 1)
-				common.Statsd.Count("yagpdb.state.cache_misses", deltaMisses, nil, 1)
+			metricsCacheHits.Add(float64(deltaHits))
+			metricsCacheMisses.Add(float64(deltaMisses))
 
-				common.Statsd.Gauge("yagpdb.state.last_members_evicted", float64(stats.MembersRemovedLastGC), nil, 1)
-				common.Statsd.Gauge("yagpdb.state.last_cache_evicted", float64(stats.CacheMisses), nil, 1)
-			}
+			metricsCacheEvictions.Add(float64(stats.UserCachceEvictedTotal - lastEvictionsCache))
+			metricsCacheMemberEvictions.Add(float64(stats.MembersRemovedTotal - lastEvictionsMembers))
+
+			lastEvictionsCache = stats.UserCachceEvictedTotal
+			lastEvictionsMembers = stats.MembersRemovedTotal
 
 			// logger.Debugf("guild cache Hits: %d Misses: %d", deltaHits, deltaMisses)
 		}
@@ -336,6 +398,7 @@ func setupShardManager() {
 		session.StateEnabled = false
 		session.LogLevel = discordgo.LogInformational
 		session.SyncEvents = true
+		session.Intents = gatewayIntentsUsed
 
 		// Certain discordgo internals expect this to be present
 		// but in case of shard migration it's not, so manually assign it here
