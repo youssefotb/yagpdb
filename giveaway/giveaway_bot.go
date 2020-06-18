@@ -158,7 +158,7 @@ func (p *Plugin) AddCommands() {
 			}
 
 			if parsed.Msg.Author.ID != giveaway.Author {
-				hasPerms, err := bot.AdminOrPermMS(commands.ContextMS(parsed.Context()), parsed.CS.ID, 0)
+				hasPerms, err := bot.AdminOrPermMS(parsed.CS.ID, parsed.MS, 0)
 				if err != nil {
 					return nil, err
 				}
@@ -189,7 +189,7 @@ func (p *Plugin) AddCommands() {
 			}
 
 			if parsed.Msg.Author.ID != giveaway.Author {
-				hasPerms, err := bot.AdminOrPermMS(commands.ContextMS(parsed.Context()), parsed.CS.ID, 0)
+				hasPerms, err := bot.AdminOrPermMS(parsed.CS.ID, parsed.MS, 0)
 				if err != nil {
 					return nil, err
 				}
